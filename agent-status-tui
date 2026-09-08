@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Executable launcher (kept extension-less to match the sibling status TUIs).
+
+All logic lives in the ``agentstatus`` package next to this file.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from agentstatus.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main())
