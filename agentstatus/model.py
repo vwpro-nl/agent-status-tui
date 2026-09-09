@@ -216,21 +216,26 @@ def time_budget(window: Window | None, now: float) -> tuple[str, str, float | No
 # -- the label is what adapts:
 #
 #   1. the label is normally centred across the whole meter;
-#   2. if the real marker cell would land on the centred label, or sit directly
-#      against it with no separating blank cell, the label steps aside --
-#        * marker left of the meter centre     -> label immediately right of it,
-#        * marker at/right of the meter centre -> label immediately left of it,
-#      always keeping exactly one blank separating cell;
-#   3. if the preferred side cannot hold the whole label inside the meter the
+#   2. it stays centred as long as the real marker cell does not fall on it (a
+#      one-cell clearance around the centred span is tolerated so a centred
+#      label is never left jammed against the marker);
+#   3. when the marker does conflict, the label moves to one side of it --
+#        * marker left of the meter centre     -> label to the right,
+#        * marker at/right of the meter centre -> label to the left,
+#      normally sitting *flush* against the marker (no separating cell).  One
+#      blank separating cell is kept only when the marker is itself the meter's
+#      extreme edge cell, so the label is not cramped against the boundary;
+#   4. if the preferred side cannot hold the whole label inside the meter the
 #      other side is tried;
-#   4. only when neither side fits is the label dropped entirely, leaving just
+#   5. only when neither side fits is the label dropped entirely, leaving just
 #      the marker and the fill.
 #
 # As soon as the marker clears the centred span the label returns to centre.
 # Placement is deterministic in ``marker_index`` and the visible cell count;
 # there are no tuned thresholds.
 
-LABEL_MARKER_GAP = 1
+CONFLICT_CLEARANCE = 1   # cells of slack around the *centred* label
+EDGE_MARKER_GAP = 1      # separating cell kept only for an edge marker
 
 
 def place_label(width: int, label: str, marker_index: int | None) -> str:
@@ -252,10 +257,11 @@ def place_label(width: int, label: str, marker_index: int | None) -> str:
     if marker_index is None:
         return row(centred)
 
-    gap = LABEL_MARKER_GAP
-    if marker_index < centred - gap or marker_index > centred + span - 1 + gap:
+    clear = CONFLICT_CLEARANCE
+    if marker_index < centred - clear or marker_index > centred + span - 1 + clear:
         return row(centred)
 
+    gap = EDGE_MARKER_GAP if marker_index in (0, width - 1) else 0
     right_start = marker_index + 1 + gap
     left_start = marker_index - gap - span
     prefer_right = marker_index < (width - 1) / 2

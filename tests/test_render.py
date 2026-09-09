@@ -353,10 +353,11 @@ class MarkerVisibilityInRenderTests(unittest.TestCase):
         marker_cell = five_meter.index("│")
         # marker cell is exactly the proportional one, regardless of the label
         self.assertEqual(marker_cell, round(0.46 * (first_w - 1)))
-        # label displaced to one side of the marker with a separating blank
+        # label displaced flush against the marker (no separating blank -- the
+        # marker is nowhere near an extreme edge here)
         self.assertTrue(
-            five_meter[marker_cell + 1:marker_cell + 2] == " "
-            or five_meter[marker_cell - 1:marker_cell] == " "
+            five_meter[marker_cell + 1:marker_cell + 4] == "63%"
+            or five_meter[marker_cell - 3:marker_cell] == "63%"
         )
 
     def test_percentage_returns_to_centre_once_the_marker_clears_it(self):

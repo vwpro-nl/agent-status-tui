@@ -189,7 +189,9 @@ class BarTests(unittest.TestCase):
     def test_label_steps_aside_when_the_marker_reaches_the_centred_label(self):
         # width 14, "50%" centres over indices 5,6,7. elapsed ~38.5% -> the
         # marker's real cell is index 5, on the "5" digit. The marker holds its
-        # cell; the whole label moves clear instead of losing a digit.
+        # cell; the whole label moves clear instead of losing a digit, and sits
+        # flush against the marker (no separating cell -- the marker is not at
+        # an extreme edge).
         plain = _strip(bar(50.0, 38.5, 14))
         self.assertEqual(len(plain), 14)
         self.assertEqual(plain.count("│"), 1)
@@ -198,8 +200,8 @@ class BarTests(unittest.TestCase):
         self.assertIn("50%", plain)                # complete label still present
         self.assertNotIn("5│", plain)              # not shifted onto the marker
         self.assertNotIn("│%", plain)              # marker did not eat a digit
-        # displaced to the right of the marker with one blank separating cell
-        self.assertEqual(plain[5:10], "│ 50%")
+        # displaced to the right of the marker, immediately adjacent
+        self.assertEqual(plain[5:9], "│50%")
 
     def test_marker_cell_is_identical_whatever_the_label_does(self):
         # the marker index must not depend on where the label ends up
@@ -271,25 +273,50 @@ class PlaceLabelTests(unittest.TestCase):
         # blank between it and the label -> no displacement.
         self.assertEqual(place_label(16, "42%", 4), "42%".center(16))
 
-    def test_marker_immediately_left_of_label_moves_label_right(self):
-        # marker at 5 (touching the centred label at 6) -> label to the right,
-        # one blank separating cell at index 6, marker cell 5 untouched here.
-        row = place_label(16, "42%", 5)
-        self.assertEqual(row.index("42%"), 7)
-        self.assertEqual(row[5], " ")          # place_label never writes the marker
-        self.assertEqual(row[6], " ")          # separating blank
-
-    def test_marker_immediately_right_of_label_moves_label_left(self):
-        # centred "42%" spans 6..8; marker at 9 -> label shifts left of it.
-        row = place_label(16, "42%", 9)
-        self.assertEqual(row.index("42%"), 5)
-        self.assertEqual(row[8], " ")          # separating blank
+    def test_displaced_label_sits_flush_on_the_marker_right(self):
+        # centred "42%" spans 6..8; a marker on the "4" (index 6) is left of the
+        # meter centre (7.5) -> label immediately RIGHT of the marker, no gap.
+        row = place_label(16, "42%", 6)
+        self.assertEqual(row.index("42%"), 7)       # marker_index + 1, flush
+        self.assertEqual(row[6], " ")               # place_label never writes the marker
         self.assertEqual(len(row), 16)
+
+    def test_displaced_label_sits_flush_on_the_marker_left(self):
+        # a marker on the "%" (index 8) is at/right of the meter centre -> label
+        # immediately LEFT of the marker, no gap.
+        row = place_label(16, "42%", 8)
+        self.assertEqual(row.index("42%"), 5)       # ends at index 7 == marker - 1
+        self.assertEqual(row[8], " ")
+        self.assertEqual(len(row), 16)
+
+    def test_marker_at_absolute_left_edge_keeps_one_gap(self):
+        # width 6, "42%" centres at index 1 (span 1..3); a conflicting marker at
+        # the extreme-left cell 0 -> label at index 2, leaving cell 1 as the gap.
+        row = place_label(6, "42%", 0)
+        self.assertEqual(row, "  42% ")
+        self.assertEqual(row.index("42%"), 2)       # 0 + 1 (edge gap) + 1
+
+    def test_marker_at_absolute_right_edge_keeps_one_gap(self):
+        # width 6, "100%" (span 1..4); a conflicting marker at the extreme-right
+        # cell 5 -> label at index 0, leaving cell 4 as the gap.
+        row = place_label(6, "100%", 5)
+        self.assertEqual(row, "100%  ")
+        self.assertEqual(row[4], " ")               # separating cell before the edge marker
+
+    def test_non_edge_marker_never_gets_a_separating_cell(self):
+        for width in (14, 16, 17, 22, 23):
+            centred = (width - 3) // 2
+            for marker in range(centred, centred + 3):   # marker on the label
+                row = place_label(width, "42%", marker)
+                start = row.index("42%")
+                flush = start == marker + 1 or start + 3 == marker
+                # or it did not actually need to move (returned to centre)
+                self.assertTrue(flush or start == centred, (width, marker, row))
 
     def test_marker_inside_centred_span_moves_label_to_a_side(self):
         row = place_label(16, "42%", 7)        # dead on the middle digit
         start = row.index("42%")
-        self.assertTrue(start >= 9 or start + 3 <= 6)   # clear of marker + a gap
+        self.assertTrue(start == 8 or start + 3 == 7)   # flush on one side
         self.assertNotIn("4", row[:7])                  # nothing left on the marker
 
     def test_marker_at_centre_still_shows_the_whole_label(self):
@@ -300,12 +327,10 @@ class PlaceLabelTests(unittest.TestCase):
             self.assertNotEqual(row[marker], "4")
 
     def test_label_returns_to_centre_as_soon_as_the_marker_clears_it(self):
-        centred = "42%".center(16)
-        # sweep the marker away from the label on the left
-        for marker in range(0, 5):
-            self.assertEqual(place_label(16, "42%", marker), centred)
-        # ... and on the right (centred label ends at 8, +1 gap -> clears at 10)
-        for marker in range(10, 16):
+        centred = "42%".center(16)          # span 6..8
+        # conflict clearance is one cell, so the label is centred for every
+        # marker outside 5..9
+        for marker in list(range(0, 5)) + list(range(10, 16)):
             self.assertEqual(place_label(16, "42%", marker), centred)
 
     def test_hundred_percent_label_is_handled(self):
@@ -338,11 +363,18 @@ class PlaceLabelTests(unittest.TestCase):
         placed = [bool(place_label(8, "42%", m).strip()) for m in range(8)]
         self.assertTrue(all(placed))
 
+    def test_smallest_bar_width_places_every_label_bar_enforces(self):
+        # bar() floors the meter at 8 cells; at that floor no label is ever
+        # dropped, for any marker position.
+        for label in ("5%", "42%", "100%"):
+            for marker in range(8):
+                self.assertTrue(place_label(8, label, marker).strip(), (label, marker))
+
     def test_label_dropped_only_as_a_last_resort(self):
-        # width 8, "100%" (4 cells) + a marker near the centre: no side can hold
-        # the label without leaving the meter -> it is dropped, marker survives.
-        row = place_label(8, "100%", 4)
-        self.assertEqual(row, " " * 8)
+        # A genuinely impossible fit: a 4-cell label in a 6-cell meter with the
+        # marker mid-span -> neither side can hold it -> dropped, marker only.
+        # (bar() never reaches this: its meter floor is 8 cells.)
+        self.assertEqual(place_label(6, "100%", 3), " " * 6)
 
     def test_marker_index_is_never_changed_for_the_label(self):
         # For every width/label/marker the marker cell that bar() paints is
