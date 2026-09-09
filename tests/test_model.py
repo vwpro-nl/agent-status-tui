@@ -6,7 +6,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from agentstatus import model
-from agentstatus.model import Window, age_text, bar, time_budget
+from agentstatus.model import Window, age_text, bar, place_label, time_budget
 from agentstatus.render import visible_len
 
 NOW = 1_000_000_000.0
@@ -186,15 +186,28 @@ class BarTests(unittest.TestCase):
         self.assertEqual(len(diffs), 1)
         self.assertEqual(yes[diffs[0]], "│")
 
-    def test_marker_overwrites_a_percentage_digit_and_stays_visible(self):
+    def test_label_steps_aside_when_the_marker_reaches_the_centred_label(self):
         # width 14, "50%" centres over indices 5,6,7. elapsed ~38.5% -> the
-        # marker's target cell is index 5, the "5" digit. It must still appear.
+        # marker's real cell is index 5, on the "5" digit. The marker holds its
+        # cell; the whole label moves clear instead of losing a digit.
         plain = _strip(bar(50.0, 38.5, 14))
         self.assertEqual(len(plain), 14)
         self.assertEqual(plain.count("│"), 1)
-        self.assertEqual(plain.index("│"), 5)
-        self.assertEqual(plain[6:8], "0%")        # rest of the label survives
-        self.assertNotIn("5│", plain)             # the "5" was overwritten, not shifted
+        self.assertEqual(plain.index("│"), 5)      # marker exactly where 38.5% puts it
+        self.assertEqual(round(0.385 * 13), 5)     # ... the proportional cell, unmoved
+        self.assertIn("50%", plain)                # complete label still present
+        self.assertNotIn("5│", plain)              # not shifted onto the marker
+        self.assertNotIn("│%", plain)              # marker did not eat a digit
+        # displaced to the right of the marker with one blank separating cell
+        self.assertEqual(plain[5:10], "│ 50%")
+
+    def test_marker_cell_is_identical_whatever_the_label_does(self):
+        # the marker index must not depend on where the label ends up
+        for elapsed in (0.0, 12.0, 38.5, 46.0, 50.0, 54.0, 88.0, 100.0):
+            with_label = _strip(bar(50.0, elapsed, 14))
+            blank_label = _strip(bar(None, elapsed, 14, label=""))
+            self.assertEqual(with_label.index("│"), blank_label.index("│"))
+            self.assertEqual(with_label.index("│"), round(elapsed / 100 * 13))
 
     def test_marker_visible_in_representative_5h_and_weekly_windows(self):
         five = Window(50.0, NOW + 150 * 60, 300)                    # ~50% elapsed
@@ -232,6 +245,116 @@ class BarTests(unittest.TestCase):
         for pct in (0.0, 45.0, 63.0, 80.0, 95.0, None):
             self.assertEqual(visible_len(bar(pct, 40.0, 14)), 14)
             self.assertEqual(visible_len(bar(pct, None, 10)), 10)
+
+
+class PlaceLabelTests(unittest.TestCase):
+    """The deterministic percentage-label placement algorithm.
+
+    Invariant under test everywhere: ``marker_index`` is an input, never an
+    output -- ``place_label`` only ever positions (or drops) the label.
+    """
+
+    def test_marker_none_is_always_centred(self):
+        self.assertEqual(place_label(16, "42%", None), "42%".center(16))
+        self.assertEqual(place_label(22, "100%", None), "100%".center(22))
+
+    def test_marker_far_left_keeps_label_centred(self):
+        row = place_label(16, "42%", 1)
+        self.assertEqual(row, "42%".center(16))
+
+    def test_marker_far_right_keeps_label_centred(self):
+        row = place_label(16, "42%", 15)
+        self.assertEqual(row, "42%".center(16))
+
+    def test_marker_one_clear_cell_from_label_still_centred(self):
+        # centred "42%" over width 16 starts at 6; a marker at 4 leaves cell 5
+        # blank between it and the label -> no displacement.
+        self.assertEqual(place_label(16, "42%", 4), "42%".center(16))
+
+    def test_marker_immediately_left_of_label_moves_label_right(self):
+        # marker at 5 (touching the centred label at 6) -> label to the right,
+        # one blank separating cell at index 6, marker cell 5 untouched here.
+        row = place_label(16, "42%", 5)
+        self.assertEqual(row.index("42%"), 7)
+        self.assertEqual(row[5], " ")          # place_label never writes the marker
+        self.assertEqual(row[6], " ")          # separating blank
+
+    def test_marker_immediately_right_of_label_moves_label_left(self):
+        # centred "42%" spans 6..8; marker at 9 -> label shifts left of it.
+        row = place_label(16, "42%", 9)
+        self.assertEqual(row.index("42%"), 5)
+        self.assertEqual(row[8], " ")          # separating blank
+        self.assertEqual(len(row), 16)
+
+    def test_marker_inside_centred_span_moves_label_to_a_side(self):
+        row = place_label(16, "42%", 7)        # dead on the middle digit
+        start = row.index("42%")
+        self.assertTrue(start >= 9 or start + 3 <= 6)   # clear of marker + a gap
+        self.assertNotIn("4", row[:7])                  # nothing left on the marker
+
+    def test_marker_at_centre_still_shows_the_whole_label(self):
+        for marker in (7, 8):
+            row = place_label(16, "42%", marker)
+            self.assertIn("42%", row)
+            self.assertEqual(len(row), 16)
+            self.assertNotEqual(row[marker], "4")
+
+    def test_label_returns_to_centre_as_soon_as_the_marker_clears_it(self):
+        centred = "42%".center(16)
+        # sweep the marker away from the label on the left
+        for marker in range(0, 5):
+            self.assertEqual(place_label(16, "42%", marker), centred)
+        # ... and on the right (centred label ends at 8, +1 gap -> clears at 10)
+        for marker in range(10, 16):
+            self.assertEqual(place_label(16, "42%", marker), centred)
+
+    def test_hundred_percent_label_is_handled(self):
+        for width in (16, 17, 22, 23):
+            for marker in range(width):
+                row = place_label(width, "100%", marker)
+                self.assertEqual(len(row), width)
+                if row.strip():
+                    self.assertIn("100%", row)
+                    # label never sits on the marker cell
+                    self.assertNotIn(row[marker], set("100%"))
+
+    def test_one_and_two_digit_labels_fit_across_compact_and_wide_bars(self):
+        # compact 62-col bars are 16 and 17; a comfortably wide layout is ~22.
+        for width in (16, 17, 22, 23):
+            for label in ("5%", "42%", "100%"):
+                dropped = 0
+                for marker in range(width):
+                    row = place_label(width, label, marker)
+                    self.assertEqual(len(row), width)
+                    if not row.strip():
+                        dropped += 1
+                    else:
+                        self.assertIn(label, row)
+                # a two-digit label is never dropped at a real dashboard width
+                if label != "100%":
+                    self.assertEqual(dropped, 0, (width, label))
+
+    def test_smallest_bar_width_still_places_two_digit_labels(self):
+        placed = [bool(place_label(8, "42%", m).strip()) for m in range(8)]
+        self.assertTrue(all(placed))
+
+    def test_label_dropped_only_as_a_last_resort(self):
+        # width 8, "100%" (4 cells) + a marker near the centre: no side can hold
+        # the label without leaving the meter -> it is dropped, marker survives.
+        row = place_label(8, "100%", 4)
+        self.assertEqual(row, " " * 8)
+
+    def test_marker_index_is_never_changed_for_the_label(self):
+        # For every width/label/marker the marker cell that bar() paints is
+        # exactly round(elapsed proportion) and does not depend on the label.
+        for width in (8, 12, 16, 17, 22, 23, 30):
+            for elapsed in range(0, 101, 7):
+                marker = round(elapsed / 100 * (width - 1))
+                for label in ("5%", "42%", "100%", "n/a", "--"):
+                    painted = _strip(
+                        bar(50.0, elapsed, width, label=label)
+                    )
+                    self.assertEqual(painted.index("│"), marker, (width, elapsed, label))
 
 
 def _strip(text):

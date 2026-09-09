@@ -209,6 +209,63 @@ def time_budget(window: Window | None, now: float) -> tuple[str, str, float | No
     return reset_text, colour, elapsed
 
 
+# --- percentage-label placement inside a meter -----------------------------
+#
+# The elapsed marker is authoritative.  Its cell is fixed by ``elapsed_percent``
+# and is *never* moved, biased or clamped to make room for the percentage text
+# -- the label is what adapts:
+#
+#   1. the label is normally centred across the whole meter;
+#   2. if the real marker cell would land on the centred label, or sit directly
+#      against it with no separating blank cell, the label steps aside --
+#        * marker left of the meter centre     -> label immediately right of it,
+#        * marker at/right of the meter centre -> label immediately left of it,
+#      always keeping exactly one blank separating cell;
+#   3. if the preferred side cannot hold the whole label inside the meter the
+#      other side is tried;
+#   4. only when neither side fits is the label dropped entirely, leaving just
+#      the marker and the fill.
+#
+# As soon as the marker clears the centred span the label returns to centre.
+# Placement is deterministic in ``marker_index`` and the visible cell count;
+# there are no tuned thresholds.
+
+LABEL_MARKER_GAP = 1
+
+
+def place_label(width: int, label: str, marker_index: int | None) -> str:
+    """Return a ``width``-cell overlay row (blanks plus ``label``) positioned so
+    it never collides with ``marker_index``.
+
+    ``label`` is assumed to be plain text (one visible cell per character), which
+    every percentage / ``n/a`` / ``--`` label is.  An all-blank row is returned
+    only when the label genuinely cannot fit beside the correctly placed marker.
+    """
+    span = len(label)
+    if span >= width:
+        return label.center(width)
+    centred = (width - span) // 2
+
+    def row(start: int) -> str:
+        return " " * start + label + " " * (width - start - span)
+
+    if marker_index is None:
+        return row(centred)
+
+    gap = LABEL_MARKER_GAP
+    if marker_index < centred - gap or marker_index > centred + span - 1 + gap:
+        return row(centred)
+
+    right_start = marker_index + 1 + gap
+    left_start = marker_index - gap - span
+    prefer_right = marker_index < (width - 1) / 2
+    order = (right_start, left_start) if prefer_right else (left_start, right_start)
+    for start in order:
+        if 0 <= start and start + span <= width:
+            return row(start)
+    return " " * width
+
+
 def bar(
     used_percent: float | None,
     elapsed_percent: float | None,
@@ -221,21 +278,23 @@ def bar(
     * every cell carries a background colour, so the meter is one continuous
       block: a filled-capacity background up to ``used_percent`` of the width,
       an empty background after it;
-    * the percentage (or ``label`` when given) is drawn as text centred
-      *across the whole meter*, not appended as a separate field;
-    * whenever ``elapsed_percent`` is not ``None`` the elapsed-time ``│``
-      marker overwrites its single target cell *unconditionally* -- even a
-      percentage digit, e.g. ``2│%``. It keeps that cell's background, so the
-      meter stays continuous and exactly ``width`` cells wide. No marker is
-      drawn when ``elapsed_percent`` is ``None``.
+    * whenever ``elapsed_percent`` is not ``None`` the elapsed-time ``│`` marker
+      occupies exactly the cell its proportional value dictates -- that cell is
+      never shifted for any reason.  No marker is drawn when ``elapsed_percent``
+      is ``None``;
+    * the percentage (or ``label`` when given) is drawn as text that is normally
+      centred *across the whole meter*, not appended as a separate field.  When
+      the marker would overlap or crowd the centred label the label is displaced
+      to the nearest side of the marker (see ``place_label``) so it stays
+      readable; it is dropped only when no side can hold it.
 
+    Either way the meter stays continuous and exactly ``width`` cells wide.
     Returns a string whose *visible* width is exactly ``width`` (it carries
     ANSI colour, so callers must measure with ``render.visible_len``).
     """
     width = max(8, width)
     if label is None:
         label = "--" if used_percent is None else f"{used_percent:.0f}%"
-    overlay = label.center(width)
 
     filled_cells = (
         0.0
@@ -247,6 +306,8 @@ def bar(
     if elapsed_percent is not None:
         elapsed = max(0.0, min(100.0, elapsed_percent))
         marker_index = round(elapsed / 100 * (width - 1))
+
+    overlay = place_label(width, label, marker_index)
 
     if used_percent is None or used_percent < 70:
         fill_bg = BAR_FILL_OK

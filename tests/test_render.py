@@ -332,9 +332,10 @@ class TerminalFrameTests(unittest.TestCase):
 
 
 class MarkerVisibilityInRenderTests(unittest.TestCase):
-    def test_marker_stays_visible_when_it_lands_on_a_percentage_digit(self):
-        # elapsed ~46% -> marker cell is index 6 of a 14-cell meter, which is
-        # the middle character of the centred "63%" label.
+    def test_percentage_survives_when_the_marker_reaches_the_centred_label(self):
+        # elapsed ~46% -> the marker cell lands on the centred "63%" label.
+        # The marker keeps its real cell; the label moves clear rather than
+        # losing a digit.
         agents = [
             AgentStatus("codex", "CODEX",
                         Window(63.0, NOW + 9720, 300),   # ~46% elapsed
@@ -344,9 +345,35 @@ class MarkerVisibilityInRenderTests(unittest.TestCase):
         codex = next(l for l in text.split("\n") if l.startswith("CODEX"))
         _agent_w, first_w, _second_w, _reset_w, _gap, _block_gap = table_geometry()
         five_meter = codex[11:11 + first_w]
-        self.assertIn("│", five_meter)
-        self.assertIn("6│%", five_meter)
         self.assertEqual(len(five_meter), first_w)
+        self.assertIn("│", five_meter)
+        self.assertIn("63%", five_meter)                 # complete label intact
+        self.assertNotIn("│%", five_meter)               # marker did not eat a digit
+        self.assertNotIn("6│%", five_meter)
+        marker_cell = five_meter.index("│")
+        # marker cell is exactly the proportional one, regardless of the label
+        self.assertEqual(marker_cell, round(0.46 * (first_w - 1)))
+        # label displaced to one side of the marker with a separating blank
+        self.assertTrue(
+            five_meter[marker_cell + 1:marker_cell + 2] == " "
+            or five_meter[marker_cell - 1:marker_cell] == " "
+        )
+
+    def test_percentage_returns_to_centre_once_the_marker_clears_it(self):
+        # elapsed ~12% -> marker far left of centre, label stays centred.
+        agents = [
+            AgentStatus("codex", "CODEX",
+                        Window(63.0, NOW + 264 * 60, 300),   # ~12% elapsed
+                        None, "live", None, NOW - 5, "ok"),
+        ]
+        text = plain(render(agents, NOW, 60, NOW + 28, 80))
+        codex = next(l for l in text.split("\n") if l.startswith("CODEX"))
+        _agent_w, first_w, _second_w, _reset_w, _gap, _block_gap = table_geometry()
+        five_meter = codex[11:11 + first_w]
+        centred = (first_w - 3) // 2
+        self.assertIn("│", five_meter)
+        self.assertLess(five_meter.index("│"), centred - 1)      # marker left of label
+        self.assertEqual(five_meter[centred:centred + 3], "63%")  # label back at centre
 
     def test_marker_absent_for_grok_na_placeholder(self):
         text = plain(render(sample_agents(), NOW, 60, NOW + 28, 80))
