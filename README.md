@@ -75,6 +75,28 @@ request cannot be made (no/expired credential, HTTP, network, or schema
 failure) Grok degrades to an activity-age row and its activity detection is
 unaffected.
 
+## Calibrator
+
+The calibrator keeps provider-native quota measurements separate from per-probe
+telemetry. Cross-provider quota comparisons must use directly observed provider
+windows; quotas are never inferred by converting tokens, USD cost, or shorter
+windows into a weekly percentage.
+
+Codex can measure its provider-native 5-hour and weekly utilization immediately
+before and after a probe. Grok can do the same for its provider-native weekly
+utilization. Both preserve the raw before/after values, reset information, and
+conservative isolation metadata; an observed delta of zero means that no exposed
+percentage boundary was crossed, not that the probe consumed no capacity.
+
+Claude exposes genuine provider-native 5-hour and 7-day utilization and reset
+information, but there is currently no safe, reliable on-demand refresh path for
+the calibrator. The permitted local caches are not synchronized closely enough
+to a probe, while direct OAuth access would require reading Claude credentials,
+which this project deliberately does not do. Claude therefore continues to use
+its existing per-probe token/cost telemetry without claiming a provider-quota
+delta. A future credential-isolating local meter may provide sanitized fresh
+quota data without giving this project access to Claude credentials.
+
 ## Refresh model
 
 Two clocks: a ~1 second display heartbeat (re-render only; the countdowns
