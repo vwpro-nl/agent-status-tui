@@ -11,6 +11,7 @@ from agentstatus.calibrator.adapters.claude import (
 )
 from agentstatus.calibrator.model import STATUS_ACTIVITY, STATUS_NONE, STATUS_UNRELIABLE, Observation
 from agentstatus.calibrator.persistence import append_history
+from agentstatus.calibrator.render import render_record
 
 
 def block(read=10, create=0, total=20, cost=0.01, actual_end="2026-09-18T06:00:00Z"):
@@ -64,6 +65,12 @@ class ClaudeCalibratorTests(unittest.TestCase):
         self.assertTrue(result.valid)
         self.assertEqual(result.values["cache_read_tokens"], 8)
         self.assertEqual(result.values["total_tokens"], 10)
+        self.assertEqual(result.display, {"c_read": 8, "c_write": 0, "input": 0,
+                                          "output": 0, "total": 10, "cost": "$0.0030"})
+        line = render_record({"timestamp": "2026-09-18T06:00:00Z",
+                              "interval_seconds": 60, "next_movement_seconds": 0,
+                              "display": result.display}, "CLAUDE")
+        self.assertIn("8         0         0         0         10        $0.0030", line)
         self.assertIn("--safe-mode", commands[1])
         self.assertEqual(commands[0][:2], ["npx", "--yes"])
 

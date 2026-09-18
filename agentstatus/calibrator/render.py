@@ -6,6 +6,21 @@ import datetime as dt
 from typing import Any, Iterable
 
 
+DISPLAY_COLUMNS = (
+    ("c_read", "C.READ"),
+    ("c_write", "C.WRITE"),
+    ("input", "IN"),
+    ("output", "OUT"),
+    ("total", "TOTAL"),
+    ("cost", "COST"),
+)
+
+_LEGACY_DISPLAY_KEYS = {
+    "c_read": ("read", "cached"),
+    "c_write": ("create", "write"),
+}
+
+
 def duration(seconds: int) -> str:
     return f"{seconds // 60}m" if seconds % 60 == 0 else f"{seconds}s"
 
@@ -14,7 +29,12 @@ def interval_label(record: dict[str, Any]) -> str:
     interval = record.get("interval_seconds")
     if interval is None:
         return "startup"
-    movement = record.get("movement_seconds")
+    # New records describe the scheduler decision that applies after this
+    # row. Legacy records have no prospective movement, so preserve their
+    # original retrospective rendering rather than changing history meaning.
+    movement = (record.get("next_movement_seconds")
+                if "next_movement_seconds" in record
+                else record.get("movement_seconds"))
     if movement is None or movement == 0:
         suffix = "·" if movement == 0 else ""
     else:
@@ -22,16 +42,25 @@ def interval_label(record: dict[str, Any]) -> str:
     return duration(int(interval)) + suffix
 
 
-def render_header(columns: tuple[tuple[str, str], ...]) -> str:
-    labels = "  ".join(f"{label:<8}" for _, label in columns)
+def render_header() -> str:
+    labels = "  ".join(f"{label:<8}" for _, label in DISPLAY_COLUMNS)
     return f"{'TIME':<8}  {'AGENT':<8} {'INTERVAL':<9} {labels}  NEXT"
 
 
+def _metric(values: dict[str, Any], key: str) -> Any:
+    if key in values:
+        return values[key]
+    for legacy in _LEGACY_DISPLAY_KEYS.get(key, ()):
+        if legacy in values:
+            return values[legacy]
+    return "-"
+
+
 def render_record(record: dict[str, Any], display_name: str,
-                  columns: tuple[tuple[str, str], ...], next_at: dt.datetime | None = None) -> str:
+                  next_at: dt.datetime | None = None) -> str:
     timestamp = dt.datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00"))
     values = record.get("display") or {}
-    metrics = "  ".join(f"{str(values.get(key, '-')):<8}" for key, _ in columns)
+    metrics = "  ".join(f"{str(_metric(values, key)):<8}" for key, _ in DISPLAY_COLUMNS)
     next_text = next_at.astimezone().strftime("%H:%M:%S") if next_at else "--"
     line = (f"{timestamp.astimezone().strftime('%H:%M:%S'):<8}  {display_name:<8} "
             f"{interval_label(record):<9} {metrics}  {next_text}")

@@ -16,6 +16,7 @@ from agentstatus.calibrator.adapters.codex import (
     CodexCalibratorAdapter, CodexProbeError, parse_exec_usage, run_command,
 )
 from agentstatus.calibrator.model import STATUS_ACTIVITY, STATUS_NONE, STATUS_UNRELIABLE, Observation
+from agentstatus.calibrator.render import render_record
 
 
 UTC = dt.timezone.utc
@@ -115,6 +116,16 @@ class CodexProbeTests(unittest.TestCase):
         self.assertEqual(result.values["cached_input_tokens"], 20)
         self.assertEqual(result.values["evidence"], "stdout")
         self.assertNotIn("cost_usd", result.values)
+        self.assertEqual(result.display, {"c_read": 20, "c_write": 4, "input": 30,
+                                          "output": 6, "total": 36, "cost": "-"})
+        # Cached input is attribution within provider-reported input and is
+        # never added to TOTAL a second time.
+        self.assertEqual(result.display["total"], 36)
+        self.assertNotEqual(result.display["total"], 20 + 4 + 30 + 6)
+        line = render_record({"timestamp": "2026-09-18T06:00:00Z",
+                              "interval_seconds": 60, "next_movement_seconds": 0,
+                              "display": result.display}, "CODEX")
+        self.assertIn("20        4         30        6         36        -", line)
 
     def test_parse_nested_token_usage(self):
         raw = json.dumps({"type": "event", "payload": {"info": {"last_token_usage": {

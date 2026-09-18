@@ -92,8 +92,6 @@ class Adapter(Protocol):
     agent: str
     display_name: str
     measurement_schema: str
-    display_columns: tuple[tuple[str, str], ...]
-
     def detect_activity(self) -> ActivityResult: ...
     def probe(self) -> Observation: ...
     def assess(self, observation: Observation, baseline: Mapping[str, Any],

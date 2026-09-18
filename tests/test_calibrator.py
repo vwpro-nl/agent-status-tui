@@ -6,7 +6,7 @@ from pathlib import Path
 from agentstatus.calibrator.core import Calibrator, VIRGIN_INTERVALS
 from agentstatus.calibrator.model import ActivityResult, Assessment, Observation
 from agentstatus.calibrator.persistence import load_histories, load_history, load_state
-from agentstatus.calibrator.render import chronological, interval_label, render_record
+from agentstatus.calibrator.render import chronological, interval_label, render_header, render_record
 
 
 UTC = dt.timezone.utc
@@ -84,7 +84,12 @@ class CalibratorTests(unittest.TestCase):
         self.assertIsNone(records[0]["interval_seconds"])
         self.assertEqual([r["interval_seconds"] for r in records[1:]],
                          [60, 60, 120, 180, 240, 300, 600, 900])
-        self.assertEqual(interval_label(records[0]), "startup")
+        self.assertEqual([interval_label(record) for record in records], [
+            "startup", "1m·", "1m↑1m", "2m↑1m", "3m↑1m", "4m↑1m",
+            "5m↑5m", "10m↑5m", "15m↑5m",
+        ])
+        self.assertEqual([record["next_interval_seconds"] for record in records],
+                         [60, 60, 120, 180, 240, 300, 600, 900, 1200])
 
     def test_restart_between_two_one_minute_measurements(self):
         self.runner().run(max_measurements=1)
@@ -92,7 +97,10 @@ class CalibratorTests(unittest.TestCase):
         self.assertEqual(first_state["sampling"]["progress"], 1)
         self.assertEqual(first_state["sampling"]["next_interval_seconds"], 60)
         self.runner().run(max_measurements=1)
-        self.assertEqual([r["interval_seconds"] for r in self.measurements()], [None, 60, 60])
+        records = self.measurements()
+        self.assertEqual([r["interval_seconds"] for r in records], [None, 60, 60])
+        self.assertEqual([interval_label(r) for r in records], ["startup", "1m·", "1m↑1m"])
+        self.assertEqual(records[-1]["next_interval_seconds"], 120)
 
     def test_resume_later_does_not_restart_virgin_sequence(self):
         self.runner().run(max_measurements=6)
@@ -106,6 +114,10 @@ class CalibratorTests(unittest.TestCase):
         state = load_state(self.state)
         self.assertEqual(state["sampling"]["progress"], 0)
         self.assertEqual(state["sampling"]["next_interval_seconds"], 60)
+        failed = self.measurements()[-1]
+        self.assertIsNone(failed["next_interval_seconds"])
+        self.assertIsNone(failed["next_movement_seconds"])
+        self.assertIsNone(failed["next_scheduled_at"])
 
     def test_next_is_computed_from_probe_end(self):
         shown = []
@@ -113,12 +125,36 @@ class CalibratorTests(unittest.TestCase):
         first = shown[0]
         ended = dt.datetime.fromisoformat(first["timestamp"].replace("Z", "+00:00"))
         next_at = dt.datetime.fromisoformat(first["next_scheduled_at"].replace("Z", "+00:00"))
-        self.assertEqual((next_at - ended).total_seconds(), 60)
+        self.assertEqual((next_at - ended).total_seconds(), first["next_interval_seconds"])
+
+    def test_every_next_deadline_uses_the_persisted_next_interval(self):
+        self.runner().run(max_measurements=8)
+        for record in self.measurements():
+            ended = dt.datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00"))
+            next_at = dt.datetime.fromisoformat(record["next_scheduled_at"].replace("Z", "+00:00"))
+            self.assertEqual((next_at - ended).total_seconds(), record["next_interval_seconds"])
+        state = load_state(self.state)
+        self.assertEqual(state["sampling"]["next_interval_seconds"],
+                         self.measurements()[-1]["next_interval_seconds"])
 
     def test_movement_rendering(self):
+        # Records with the additive prospective field use the new contract.
+        self.assertEqual(interval_label({"interval_seconds": 60, "movement_seconds": 0,
+                                         "next_movement_seconds": 60}), "1m↑1m")
+        # Legacy records retain their original retrospective interpretation.
         self.assertEqual(interval_label({"interval_seconds": 60, "movement_seconds": 0}), "1m·")
         self.assertEqual(interval_label({"interval_seconds": 120, "movement_seconds": 60}), "2m↑1m")
         self.assertEqual(interval_label({"interval_seconds": 3300, "movement_seconds": -300}), "55m↓5m")
+
+    def test_uniform_header_and_legacy_history_rendering(self):
+        self.assertEqual(render_header(),
+            "TIME      AGENT    INTERVAL  C.READ    C.WRITE   IN        OUT       TOTAL     COST      NEXT")
+        legacy = {"timestamp": "2026-09-18T06:00:00Z", "interval_seconds": 60,
+                  "movement_seconds": 0,
+                  "display": {"read": 8, "create": 2, "total": 10, "cost": "$0.0010"}}
+        line = render_record(legacy, "CLAUDE")
+        self.assertIn("1m·", line)
+        self.assertIn("8         2         -         -         10        $0.0010", line)
 
     def test_history_is_chronological_and_identified(self):
         self.runner().run(max_measurements=2)

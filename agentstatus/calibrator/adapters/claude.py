@@ -110,8 +110,6 @@ class ClaudeCalibratorAdapter:
     agent = "claude"
     display_name = "CLAUDE"
     measurement_schema = "claude-ccusage/v1"
-    display_columns = (("read", "READ"), ("create", "CREATE"),
-                       ("total", "TOTAL"), ("cost", "API COST"))
 
     def __init__(self, projects_dir: Path, *, model: str = "sonnet",
                  prompt: str = "Reply only: OK", claude_command: list[str] | None = None,
@@ -247,7 +245,9 @@ class ClaudeCalibratorAdapter:
                       "cache_read_tokens": delta["cacheReadInputTokens"],
                       "total_tokens": delta["totalTokens"], "cost_usd": float(delta["costUSD"]),
                       "initial_block": before is None}
-            display = {"read": values["cache_read_tokens"], "create": values["cache_create_tokens"],
+            display = {"c_read": values["cache_read_tokens"],
+                       "c_write": values["cache_create_tokens"],
+                       "input": values["input_tokens"], "output": values["output_tokens"],
                        "total": values["total_tokens"], "cost": f"${values['cost_usd']:.4f}"}
             return Observation(True, measurement_id, values, display)
         except (ClaudeProbeError, OSError) as exc:

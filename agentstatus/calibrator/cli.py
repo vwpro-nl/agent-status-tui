@@ -65,16 +65,16 @@ def main(argv: list[str]) -> int:
               f"progress={state['sampling']['progress']}")
         return 0
     if args.action == "history":
-        print(render_header(adapter.display_columns))
+        print(render_header())
         for record in chronological(r for r in load_history(history_path) if r.get("event") == "measurement"):
             next_text = record.get("next_scheduled_at")
             next_at = dt.datetime.fromisoformat(next_text.replace("Z", "+00:00")) if next_text else None
-            print(render_record(record, adapter.display_name, adapter.display_columns, next_at))
+            print(render_record(record, adapter.display_name, next_at))
         return 0
-    print(render_header(adapter.display_columns))
+    print(render_header())
     calibrator = Calibrator(adapter, state_path, history_path, check_interval=args.check_interval)
     def emit(record):
         value = record.get("next_scheduled_at")
         next_at = dt.datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
-        print(render_record(record, adapter.display_name, adapter.display_columns, next_at), flush=True)
+        print(render_record(record, adapter.display_name, next_at), flush=True)
     return calibrator.run(max_measurements=args.max_measurements, emit=emit)

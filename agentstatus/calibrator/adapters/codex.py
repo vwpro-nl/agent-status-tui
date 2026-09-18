@@ -109,8 +109,6 @@ class CodexCalibratorAdapter:
     agent = "codex"
     display_name = "CODEX"
     measurement_schema = "codex-exec-usage/v1"
-    display_columns = (("cached", "CACHED"), ("write", "WRITE"),
-                       ("input", "IN"), ("output", "OUT"), ("total", "TOTAL"))
 
     def __init__(self, codex_home: Path, *, model: str, prompt: str = "Reply only: OK",
                  codex_command: list[str] | None = None, scratch_root: Path | None = None,
@@ -243,10 +241,10 @@ class CodexCalibratorAdapter:
                 evidence = "probe-rollout"
             if usage is None:
                 raise CodexProbeError("Codex probe returned no usable token usage")
-            display = {"cached": usage["cached_input_tokens"],
-                       "write": usage["cache_write_input_tokens"],
+            display = {"c_read": usage["cached_input_tokens"],
+                       "c_write": usage["cache_write_input_tokens"],
                        "input": usage["input_tokens"], "output": usage["output_tokens"],
-                       "total": usage["total_tokens"]}
+                       "total": usage["total_tokens"], "cost": "-"}
             return Observation(True, measurement_id, {**usage, "evidence": evidence}, display)
         except (CodexProbeError, OSError, sqlite3.Error) as exc:
             return Observation(False, measurement_id, error=str(exc))

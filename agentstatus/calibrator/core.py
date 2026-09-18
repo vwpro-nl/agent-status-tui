@@ -151,13 +151,21 @@ class Calibrator:
             prospective_progress = int(sampling["progress"]) + (0 if startup else 1)
             prospective_next = (VIRGIN_INTERVALS[0] if startup else
                                 _next_interval(prospective_progress, int(interval)))
+            next_interval = prospective_next if success else None
+            next_movement = (
+                next_interval - int(interval)
+                if next_interval is not None and interval is not None else None
+            )
             record = self._record(
                 "measurement", finished, measurement_id=observation.measurement_id,
                 interval_seconds=interval, valid=observation.valid,
                 classification=assessment.classification, values=dict(observation.values),
                 display=dict(observation.display), error=observation.error,
                 movement_seconds=movement, update_baseline=assessment.update_baseline,
-                next_scheduled_at=iso(finished + dt.timedelta(seconds=prospective_next)) if success else None,
+                next_interval_seconds=next_interval,
+                next_movement_seconds=next_movement,
+                next_scheduled_at=(iso(finished + dt.timedelta(seconds=next_interval))
+                                   if next_interval is not None else None),
             )
             if emit:
                 emit(record)
@@ -166,12 +174,12 @@ class Calibrator:
             if assessment.update_baseline:
                 state["baseline"] = dict(assessment.baseline)
             sampling["last_probe_finished_at"] = iso(finished)
+            sampling["next_interval_seconds"] = next_interval
             if startup:
                 sampling["startup_complete"] = True
             else:
                 sampling["last_measured_interval_seconds"] = interval
                 sampling["progress"] = int(sampling["progress"]) + 1
-                sampling["next_interval_seconds"] = _next_interval(int(sampling["progress"]), interval)
                 completed += 1
             state["updated_at"] = iso(finished)
             save_state(self.state_path, state)
