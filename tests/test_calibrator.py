@@ -122,9 +122,9 @@ class CalibratorTests(unittest.TestCase):
         self.assertEqual(state["sampling"]["progress"], 0)
         self.assertEqual(state["sampling"]["next_interval_seconds"], 60)
         failed = self.measurements()[-1]
-        self.assertIsNone(failed["next_interval_seconds"])
-        self.assertIsNone(failed["next_movement_seconds"])
-        self.assertIsNone(failed["next_scheduled_at"])
+        self.assertEqual(failed["next_interval_seconds"], 60)
+        self.assertEqual(state["sampling"]["next_interval_seconds"], 60)
+        self.assertIsNotNone(failed["next_scheduled_at"])
 
     def test_next_is_computed_from_probe_end(self):
         shown = []
@@ -228,15 +228,12 @@ class CalibratorTests(unittest.TestCase):
         agents = {r["agent"] for r in merged}
         self.assertEqual(agents, {"test-agent", "other-agent"})
 
-    def test_controller_state_is_reserved_and_left_untouched(self):
+    def test_controller_state_is_present_and_versioned(self):
         self.runner().run(max_measurements=1)
         state = load_state(self.state)
-        self.assertIn("controller", state)
+        self.assertEqual(state["controller"]["mode"], "explore")
         self.assertIn("schema", state["controller"])
-        before = dict(state["controller"])
-        self.runner().run(max_measurements=1)
-        after = load_state(self.state)["controller"]
-        self.assertEqual(before, after)
+        self.assertIn("evidence", state["controller"])
 
     # -- baseline contract (generic: the core only ever respects the flag) --
     #
@@ -254,20 +251,25 @@ class CalibratorTests(unittest.TestCase):
         self.runner().run(max_measurements=1)
         self.assertEqual(load_state(self.state)["sampling"]["progress"], 1)
 
-    def test_bad_classification_advances_ladder_without_updating_baseline(self):
+    def test_bad_classification_does_not_advance_explorer_and_enters_confirm(self):
         self.adapter = FakeAdapter(self.clock, classifications=["good", "bad"],
                                    update_baseline=[False, False])
         self.runner().run(max_measurements=1)
         state = load_state(self.state)
-        self.assertEqual(state["sampling"]["progress"], 1)
+        self.assertEqual(state["sampling"]["progress"], 0)
+        self.assertEqual(state["sampling"]["next_interval_seconds"], 60)
+        self.assertEqual(state["controller"]["mode"], "confirm")
         self.assertEqual(state["baseline"], {})
 
-    def test_init_classification_advances_ladder_without_updating_baseline(self):
+    def test_init_classification_does_not_advance_ladder_or_controller(self):
         self.adapter = FakeAdapter(self.clock, classifications=["good", "init"],
                                    update_baseline=[False, False])
         self.runner().run(max_measurements=1)
         state = load_state(self.state)
-        self.assertEqual(state["sampling"]["progress"], 1)
+        self.assertEqual(state["sampling"]["progress"], 0)
+        self.assertEqual(state["sampling"]["next_interval_seconds"], 60)
+        self.assertEqual(state["controller"]["mode"], "explore")
+        self.assertEqual(state["controller"]["evidence"], {})
         self.assertEqual(state["baseline"], {})
 
     def test_fail_does_not_advance_ladder(self):

@@ -13,7 +13,7 @@ from typing import Any, Iterable
 # "controller" (reserved, opaque, for a future strategy layer). See
 # agentstatus/calibrator/model.py for the full rationale.
 STATE_SCHEMA = "agent-status-calibrator-state/v2"
-CONTROLLER_STATE_SCHEMA = "agent-status-calibrator-controller-state/v1"
+CONTROLLER_STATE_SCHEMA = "agent-status-calibrator-controller-state/v2"
 HISTORY_SCHEMA = "agent-status-calibrator-history/v1"
 
 

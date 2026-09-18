@@ -7,8 +7,12 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from .controller import (
+    apply as apply_controller, controller_schema_is_current, empty_controller,
+    ensure_controller, migrate_legacy_controller,
+)
 from .model import STATUS_ACTIVITY, STATUS_UNRELIABLE, Adapter
-from .persistence import CONTROLLER_STATE_SCHEMA, STATE_SCHEMA, append_history, load_state, save_state
+from .persistence import STATE_SCHEMA, append_history, load_history, load_state, save_state
 
 VIRGIN_INTERVALS = (60, 60, 120, 180, 240, 300)
 LINEAR_STEP = 300
@@ -51,10 +55,7 @@ def initial_state(adapter: Adapter) -> dict[str, Any]:
         # Adapter-owned provider assessment. Only ever replaced when the
         # adapter's Assessment sets update_baseline=True.
         "baseline": {},
-        # Reserved for a future controller/strategy layer (KEEP/LET_EXPIRE,
-        # economics, boundary search). Intentionally opaque and untouched by
-        # this phase -- versioned so a later phase can migrate it safely.
-        "controller": {"schema": CONTROLLER_STATE_SCHEMA},
+        "controller": empty_controller(),
         "updated_at": None,
     }
 
@@ -92,6 +93,12 @@ class Calibrator:
         expected = (self.adapter.agent, self.adapter.provider, self.adapter.measurement_schema)
         if identity != expected:
             raise CalibratorError("persisted calibrator identity does not match adapter")
+        raw_controller = state.get("controller")
+        if controller_schema_is_current(raw_controller):
+            state["controller"] = ensure_controller(raw_controller)
+        else:
+            state = migrate_legacy_controller(state, load_history(self.history_path))
+            save_state(self.state_path, state)
         return state, True
 
     def _probe_floor(self, sampling: dict[str, Any]) -> dt.datetime:
@@ -146,6 +153,13 @@ class Calibrator:
                 # read as "no activity". It changes nothing about the
                 # deadline and is simply retried on the next tick.
                 self._record("activity-unreliable", self.clock(), failed_checks=list(newer.failed_checks))
+        started = self.clock()
+        silence = max(0, int(round((started - anchor).total_seconds())))
+        return {
+            "wait_anchor_at": iso(anchor),
+            "scheduled_at": iso(deadline),
+            "actual_silence_seconds": silence,
+        }
 
     def run(self, *, max_measurements: int | None = None,
             emit: Callable[[dict[str, Any]], None] | None = None,
@@ -158,18 +172,25 @@ class Calibrator:
             sampling = state["sampling"]
             startup = not sampling["startup_complete"]
             interval = None if startup else int(sampling["next_interval_seconds"])
+            wait_info = None
             if not startup:
-                self._wait_for_interval(sampling, interval, on_wait=on_wait)
+                wait_info = self._wait_for_interval(sampling, interval, on_wait=on_wait)
             observation = self.adapter.probe()
             finished = self.clock()
             assessment = self.adapter.assess(observation, state.get("baseline", {}), startup=startup)
             success = observation.valid and assessment.classification != "fail"
             previous = sampling.get("last_measured_interval_seconds")
             movement = None if interval is None or previous is None else interval - int(previous)
-            prospective_progress = int(sampling["progress"]) + (0 if startup else 1)
-            prospective_next = (VIRGIN_INTERVALS[0] if startup else
-                                _next_interval(prospective_progress, int(interval)))
-            next_interval = prospective_next if success else None
+            controller, sampling_updates = apply_controller(
+                sampling, state.get("controller"),
+                interval=interval, classification=assessment.classification,
+                valid=observation.valid and assessment.classification != "fail",
+            )
+            next_interval = sampling_updates["next_interval_seconds"]
+            if not success and startup:
+                # Startup is not an interval measurement; a failed startup
+                # must not advertise a 1m wait as if the explorer had begun.
+                next_interval = None
             next_movement = (
                 next_interval - int(interval)
                 if next_interval is not None and interval is not None else None
@@ -184,6 +205,9 @@ class Calibrator:
                 next_movement_seconds=next_movement,
                 next_scheduled_at=(iso(finished + dt.timedelta(seconds=next_interval))
                                    if next_interval is not None else None),
+                wait_anchor_at=None if wait_info is None else wait_info["wait_anchor_at"],
+                scheduled_wait_at=None if wait_info is None else wait_info["scheduled_at"],
+                actual_silence_seconds=None if wait_info is None else wait_info["actual_silence_seconds"],
             )
             if emit:
                 emit(record)
@@ -191,13 +215,14 @@ class Calibrator:
                 return 1
             if assessment.update_baseline:
                 state["baseline"] = dict(assessment.baseline)
+            state["controller"] = controller
             sampling["last_probe_finished_at"] = iso(finished)
-            sampling["next_interval_seconds"] = next_interval
+            sampling["next_interval_seconds"] = sampling_updates["next_interval_seconds"]
+            sampling["progress"] = sampling_updates["progress"]
+            sampling["last_measured_interval_seconds"] = sampling_updates["last_measured_interval_seconds"]
             if startup:
                 sampling["startup_complete"] = True
             else:
-                sampling["last_measured_interval_seconds"] = interval
-                sampling["progress"] = int(sampling["progress"]) + 1
                 completed += 1
             state["updated_at"] = iso(finished)
             save_state(self.state_path, state)
