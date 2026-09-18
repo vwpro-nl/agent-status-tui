@@ -50,6 +50,23 @@ class CliTests(unittest.TestCase):
         self.assertIn("time.time() >= next_refresh_at", source)
         self.assertIn("tick_deadline = time.monotonic() + 1.0", source)
 
+    def test_normal_status_route_never_imports_or_runs_calibrator(self):
+        import subprocess
+        real_popen = subprocess.Popen
+        def forbidden_probe(*args, **kwargs):
+            raise AssertionError("normal status route started a subprocess/probe")
+        real_collect = cli.collect
+        cli.collect = lambda env, now, previous=None: []
+        subprocess.Popen = forbidden_probe
+        try:
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(["--once"]), 0)
+        finally:
+            cli.collect = real_collect
+            subprocess.Popen = real_popen
+        import inspect
+        self.assertIn('effective_argv[0] == "calibrator"', inspect.getsource(cli.main))
+
 
 if __name__ == "__main__":
     unittest.main()
