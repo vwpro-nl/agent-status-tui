@@ -11,7 +11,9 @@ from agentstatus.calibrator import cli
 from agentstatus.calibrator.core import Calibrator, VIRGIN_INTERVALS
 from agentstatus.calibrator.model import ActivityResult, Assessment, Observation
 from agentstatus.calibrator.persistence import load_histories, load_history, load_state
-from agentstatus.calibrator.render import chronological, interval_label, render_header, render_record
+from agentstatus.calibrator.render import (
+    chronological, interval_label, render_header, render_record, render_wait_status,
+)
 
 
 UTC = dt.timezone.utc
@@ -369,6 +371,117 @@ class CalibratorTests(unittest.TestCase):
         self.runner(check_interval=30).run(max_measurements=1, emit=shown.append)
         finished = dt.datetime.fromisoformat(shown[0]["timestamp"].replace("Z", "+00:00"))
         self.assertGreaterEqual((finished - start).total_seconds(), 60)
+
+    def test_wait_status_appears_before_sleeper_and_interval_probe(self):
+        self.adapter = ScriptedActivityAdapter(self.clock, [ActivityResult("none")] * 30)
+        waits = []
+        sleeps = []
+        def sleeper(seconds):
+            sleeps.append((self.adapter.probes, seconds))
+            self.clock.sleep(seconds)
+        Calibrator(self.adapter, self.state, self.history, clock=self.clock,
+                   sleeper=sleeper, check_interval=30).run(
+            max_measurements=1, on_wait=waits.append)
+        self.assertEqual(len(waits), 1)
+        self.assertEqual(waits[0]["event"], "wait-status")
+        self.assertEqual(waits[0]["reason"], "initial")
+        self.assertEqual(waits[0]["interval_seconds"], 60)
+        self.assertEqual(sleeps[0][0], 1)
+        self.assertEqual(self.adapter.probes, 2)
+        self.assertFalse(any(r["event"] == "wait-status" for r in load_history(self.history)))
+
+    def test_wait_status_initial_deadline_uses_probe_floor(self):
+        waits = []
+        self.runner().run(max_measurements=1, on_wait=waits.append)
+        finished = dt.datetime.fromisoformat(self.measurements()[0]["timestamp"].replace("Z", "+00:00"))
+        scheduled = dt.datetime.fromisoformat(waits[0]["scheduled_at"].replace("Z", "+00:00"))
+        self.assertEqual((scheduled - finished).total_seconds(), 60)
+
+    def test_recent_activity_shifts_initial_wait_deadline(self):
+        activity_at = dt.datetime(2026, 9, 18, 6, 0, 20, tzinfo=UTC)
+        self.adapter = ScriptedActivityAdapter(
+            self.clock, [ActivityResult("activity", activity_at, reliable_checks=1, source="live")] * 20)
+        waits = []
+        self.runner().run(max_measurements=1, on_wait=waits.append)
+        scheduled = dt.datetime.fromisoformat(waits[0]["scheduled_at"].replace("Z", "+00:00"))
+        self.assertEqual(scheduled, activity_at + dt.timedelta(seconds=60))
+
+    def test_newer_activity_during_wait_emits_reschedule(self):
+        first = dt.datetime(2026, 9, 18, 6, 0, 10, tzinfo=UTC)
+        later = dt.datetime(2026, 9, 18, 6, 0, 40, tzinfo=UTC)
+        self.adapter = ScriptedActivityAdapter(self.clock, [
+            ActivityResult("activity", first, reliable_checks=1, source="a"),
+            ActivityResult("activity", later, reliable_checks=1, source="b"),
+        ] + [ActivityResult("none")] * 20)
+        waits = []
+        self.runner(check_interval=30).run(max_measurements=1, on_wait=waits.append)
+        self.assertGreaterEqual(len(waits), 2)
+        self.assertEqual(waits[0]["reason"], "initial")
+        self.assertEqual(waits[1]["reason"], "rescheduled")
+        scheduled = dt.datetime.fromisoformat(waits[1]["scheduled_at"].replace("Z", "+00:00"))
+        self.assertEqual(scheduled, later + dt.timedelta(seconds=60))
+
+    def test_unreliable_activity_does_not_shorten_wait_deadline(self):
+        waits = []
+        self.adapter = ScriptedActivityAdapter(self.clock, [
+            ActivityResult("none"),
+            ActivityResult("unreliable", failed_checks=("x",)),
+        ] + [ActivityResult("none")] * 20)
+        self.runner(check_interval=30).run(max_measurements=1, on_wait=waits.append)
+        finished = dt.datetime.fromisoformat(self.measurements()[0]["timestamp"].replace("Z", "+00:00"))
+        scheduled = dt.datetime.fromisoformat(waits[0]["scheduled_at"].replace("Z", "+00:00"))
+        self.assertEqual((scheduled - finished).total_seconds(), 60)
+        self.assertEqual([w["reason"] for w in waits], ["initial"])
+
+    def test_startup_does_not_emit_interval_wait_status(self):
+        waits = []
+        probes_at_wait = []
+        def on_wait(status):
+            probes_at_wait.append(self.adapter.probes)
+            waits.append(status)
+        self.runner().run(max_measurements=1, on_wait=on_wait)
+        self.assertTrue(all(count >= 1 for count in probes_at_wait))
+        self.assertTrue(all(w["interval_seconds"] == 60 for w in waits))
+
+    def test_resume_ignores_expired_persisted_next_scheduled_at(self):
+        from agentstatus.calibrator.core import initial_state, iso
+        from agentstatus.calibrator.persistence import save_state
+        state = initial_state(self.adapter)
+        state["sampling"]["startup_complete"] = True
+        state["sampling"]["progress"] = 1
+        state["sampling"]["next_interval_seconds"] = 60
+        state["sampling"]["last_measured_interval_seconds"] = 60
+        state["sampling"]["last_probe_finished_at"] = iso(self.clock())
+        save_state(self.state, state)
+        from agentstatus.calibrator.persistence import append_history
+        append_history(self.history, {
+            "event": "measurement", "timestamp": iso(self.clock()),
+            "agent": "test-agent", "provider": "test-provider",
+            "measurement_schema": "test/v1", "interval_seconds": 60,
+            "next_scheduled_at": "2026-09-18T05:00:00Z",
+        })
+        self.adapter = ScriptedActivityAdapter(self.clock, [ActivityResult("none")] * 30)
+        waits = []
+        self.runner().run(max_measurements=1, on_wait=waits.append)
+        scheduled = dt.datetime.fromisoformat(waits[0]["scheduled_at"].replace("Z", "+00:00"))
+        self.assertEqual(scheduled, dt.datetime(2026, 9, 18, 6, 1, tzinfo=UTC))
+        self.assertNotEqual(waits[0]["scheduled_at"], "2026-09-18T05:00:00Z")
+
+    def test_wait_status_rendering_does_not_reuse_measurement_metrics(self):
+        now = dt.datetime(2026, 9, 18, 6, 0, 7, tzinfo=UTC)
+        deadline = dt.datetime(2026, 9, 18, 6, 1, 7, tzinfo=UTC)
+        line = render_wait_status("TEST", 60, now, deadline)
+        self.assertIn("1m", line)
+        self.assertIn("-", line)
+        self.assertNotIn("$", line)
+        measured = render_record({
+            "timestamp": "2026-09-18T06:00:07Z",
+            "interval_seconds": 60,
+            "next_movement_seconds": 0,
+            "display": {"c_read": 20, "c_write": 4, "input": 30, "output": 6, "total": 36, "cost": "-"},
+        }, "TEST", deadline)
+        self.assertIn("20", measured)
+        self.assertNotEqual(line, measured)
 
 
 class ScratchDirCliTests(unittest.TestCase):

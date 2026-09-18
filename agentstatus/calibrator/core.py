@@ -102,7 +102,22 @@ class Calibrator:
         # past and firing an unwarranted immediate probe.
         return _parse_iso(floor_text) if isinstance(floor_text, str) else self.clock()
 
-    def _wait_for_interval(self, sampling: dict[str, Any], interval: int) -> None:
+    def _emit_wait(self, on_wait: Callable[[dict[str, Any]], None] | None,
+                   interval: int, deadline: dt.datetime, reason: str) -> None:
+        if on_wait is None:
+            return
+        on_wait({
+            "event": "wait-status",
+            "timestamp": iso(self.clock()),
+            "agent": self.adapter.agent,
+            "provider": self.adapter.provider,
+            "interval_seconds": interval,
+            "scheduled_at": iso(deadline),
+            "reason": reason,
+        })
+
+    def _wait_for_interval(self, sampling: dict[str, Any], interval: int,
+                           on_wait: Callable[[dict[str, Any]], None] | None = None) -> None:
         floor = self._probe_floor(sampling)
         known_at = None
         result = self.adapter.detect_activity()
@@ -112,6 +127,7 @@ class Calibrator:
             self._record("activity-unreliable", self.clock(), failed_checks=list(result.failed_checks))
         anchor = max(known_at, floor) if known_at is not None else floor
         deadline = anchor + dt.timedelta(seconds=interval)
+        self._emit_wait(on_wait, interval, deadline, "initial")
         while self.clock() < deadline:
             self.sleeper(min(self.check_interval, (deadline - self.clock()).total_seconds()))
             newer = self.adapter.detect_activity()
@@ -124,6 +140,7 @@ class Calibrator:
                 deadline = newer.at + dt.timedelta(seconds=interval)
                 self._record("activity-detected", self.clock(), source=newer.source,
                              scheduled_at=iso(deadline))
+                self._emit_wait(on_wait, interval, deadline, "rescheduled")
             elif newer.status == STATUS_UNRELIABLE:
                 # Fail-closed retry: an unreliable check is never silently
                 # read as "no activity". It changes nothing about the
@@ -131,7 +148,8 @@ class Calibrator:
                 self._record("activity-unreliable", self.clock(), failed_checks=list(newer.failed_checks))
 
     def run(self, *, max_measurements: int | None = None,
-            emit: Callable[[dict[str, Any]], None] | None = None) -> int:
+            emit: Callable[[dict[str, Any]], None] | None = None,
+            on_wait: Callable[[dict[str, Any]], None] | None = None) -> int:
         state, resumed = self.load()
         now = self.clock()
         self._record("run-started", now, resumed=resumed)
@@ -141,7 +159,7 @@ class Calibrator:
             startup = not sampling["startup_complete"]
             interval = None if startup else int(sampling["next_interval_seconds"])
             if not startup:
-                self._wait_for_interval(sampling, interval)
+                self._wait_for_interval(sampling, interval, on_wait=on_wait)
             observation = self.adapter.probe()
             finished = self.clock()
             assessment = self.adapter.assess(observation, state.get("baseline", {}), startup=startup)

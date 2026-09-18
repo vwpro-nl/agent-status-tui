@@ -10,7 +10,7 @@ from pathlib import Path
 from .adapters import ClaudeCalibratorAdapter, CodexCalibratorAdapter, GrokCalibratorAdapter
 from .core import Calibrator
 from .persistence import load_history, load_state
-from .render import chronological, render_header, render_record
+from .render import chronological, render_header, render_record, render_wait_status
 
 
 def default_root() -> Path:
@@ -85,4 +85,9 @@ def main(argv: list[str]) -> int:
         value = record.get("next_scheduled_at")
         next_at = dt.datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
         print(render_record(record, adapter.display_name, next_at), flush=True)
-    return calibrator.run(max_measurements=args.max_measurements, emit=emit)
+    def on_wait(status):
+        scheduled = dt.datetime.fromisoformat(status["scheduled_at"].replace("Z", "+00:00"))
+        when = dt.datetime.fromisoformat(status["timestamp"].replace("Z", "+00:00"))
+        print(render_wait_status(adapter.display_name, status["interval_seconds"],
+                                 when, scheduled), flush=True)
+    return calibrator.run(max_measurements=args.max_measurements, emit=emit, on_wait=on_wait)

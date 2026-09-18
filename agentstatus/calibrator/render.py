@@ -42,6 +42,15 @@ def interval_label(record: dict[str, Any]) -> str:
     return duration(int(interval)) + suffix
 
 
+def render_wait_status(display_name: str, interval_seconds: int, now: dt.datetime,
+                       scheduled_at: dt.datetime) -> str:
+    """Runtime wait line. Not a measurement: metrics are unknown, not reused."""
+    metrics = "  ".join(f"{'-':<8}" for _ in DISPLAY_COLUMNS)
+    next_text = scheduled_at.astimezone().strftime("%H:%M:%S")
+    return (f"{now.astimezone().strftime('%H:%M:%S'):<8}  {display_name:<8} "
+            f"{duration(int(interval_seconds)):<9} {metrics}  {next_text}")
+
+
 def render_header() -> str:
     labels = "  ".join(f"{label:<8}" for _, label in DISPLAY_COLUMNS)
     return f"{'TIME':<8}  {'AGENT':<8} {'INTERVAL':<9} {labels}  NEXT"
