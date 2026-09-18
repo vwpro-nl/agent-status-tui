@@ -445,6 +445,73 @@ class CalibratorTests(unittest.TestCase):
         self.assertTrue(all(count >= 1 for count in probes_at_wait))
         self.assertTrue(all(w["interval_seconds"] == 60 for w in waits))
 
+    def test_resume_stale_probe_floor_waits_full_interval_from_run_start(self):
+        from agentstatus.calibrator.core import initial_state, iso
+        from agentstatus.calibrator.persistence import save_state
+        stale = self.clock() - dt.timedelta(hours=2)
+        state = initial_state(self.adapter)
+        state["sampling"]["startup_complete"] = True
+        state["sampling"]["progress"] = 7
+        state["sampling"]["next_interval_seconds"] = 900
+        state["sampling"]["last_measured_interval_seconds"] = 900
+        state["sampling"]["last_probe_finished_at"] = iso(stale)
+        save_state(self.state, state)
+        self.adapter = ScriptedActivityAdapter(self.clock, [ActivityResult("none")] * 40)
+        waits = []
+        start = self.clock()
+        shown = []
+        Calibrator(self.adapter, self.state, self.history, clock=self.clock,
+                   sleeper=self.clock.sleep, check_interval=30).run(
+            max_measurements=1, emit=shown.append, on_wait=waits.append)
+        scheduled = dt.datetime.fromisoformat(waits[0]["scheduled_at"].replace("Z", "+00:00"))
+        self.assertEqual(scheduled, start + dt.timedelta(seconds=900))
+        self.assertGreater(scheduled, start)
+        probe = shown[0]
+        finished = dt.datetime.fromisoformat(probe["timestamp"].replace("Z", "+00:00"))
+        self.assertGreaterEqual((finished - start).total_seconds(), 900)
+        self.assertGreaterEqual(probe["actual_silence_seconds"], 900)
+        self.assertEqual(probe["interval_seconds"], 900)
+
+    def test_resume_activity_newer_than_run_start_shifts_deadline(self):
+        from agentstatus.calibrator.core import initial_state, iso
+        from agentstatus.calibrator.persistence import save_state
+        stale = self.clock() - dt.timedelta(hours=2)
+        state = initial_state(self.adapter)
+        state["sampling"]["startup_complete"] = True
+        state["sampling"]["next_interval_seconds"] = 60
+        state["sampling"]["last_probe_finished_at"] = iso(stale)
+        save_state(self.state, state)
+        activity_at = self.clock() + dt.timedelta(seconds=20)
+        self.adapter = ScriptedActivityAdapter(
+            self.clock, [ActivityResult("activity", activity_at, reliable_checks=1, source="live")] * 20)
+        waits = []
+        Calibrator(self.adapter, self.state, self.history, clock=self.clock,
+                   sleeper=self.clock.sleep, check_interval=30).run(
+            max_measurements=1, on_wait=waits.append)
+        scheduled = dt.datetime.fromisoformat(waits[0]["scheduled_at"].replace("Z", "+00:00"))
+        self.assertEqual(scheduled, activity_at + dt.timedelta(seconds=60))
+
+    def test_second_interval_same_run_uses_probe_floor_not_run_start(self):
+        from agentstatus.calibrator.core import initial_state, iso
+        from agentstatus.calibrator.persistence import save_state
+        stale = self.clock() - dt.timedelta(hours=2)
+        state = initial_state(self.adapter)
+        state["sampling"]["startup_complete"] = True
+        state["sampling"]["next_interval_seconds"] = 60
+        state["sampling"]["last_probe_finished_at"] = iso(stale)
+        save_state(self.state, state)
+        self.adapter = ScriptedActivityAdapter(self.clock, [ActivityResult("none")] * 80)
+        waits = []
+        Calibrator(self.adapter, self.state, self.history, clock=self.clock,
+                   sleeper=self.clock.sleep, check_interval=30).run(
+            max_measurements=2, on_wait=waits.append)
+        first = dt.datetime.fromisoformat(waits[0]["scheduled_at"].replace("Z", "+00:00"))
+        second = dt.datetime.fromisoformat(waits[1]["scheduled_at"].replace("Z", "+00:00"))
+        self.assertEqual(first, dt.datetime(2026, 9, 18, 6, 1, tzinfo=UTC))
+        first_probe = dt.datetime.fromisoformat(self.measurements()[0]["timestamp"].replace("Z", "+00:00"))
+        self.assertEqual(second, first_probe + dt.timedelta(seconds=60))
+        self.assertGreater(second, first)
+
     def test_resume_ignores_expired_persisted_next_scheduled_at(self):
         from agentstatus.calibrator.core import initial_state, iso
         from agentstatus.calibrator.persistence import save_state

@@ -124,8 +124,13 @@ class Calibrator:
         })
 
     def _wait_for_interval(self, sampling: dict[str, Any], interval: int,
-                           on_wait: Callable[[dict[str, Any]], None] | None = None) -> None:
+                           on_wait: Callable[[dict[str, Any]], None] | None = None,
+                           floor_at_least: dt.datetime | None = None) -> dict[str, Any]:
         floor = self._probe_floor(sampling)
+        if floor_at_least is not None:
+            # First wait after resume: silence from before this run must not
+            # count toward a new boundary sample.
+            floor = max(floor, floor_at_least)
         known_at = None
         result = self.adapter.detect_activity()
         if result.status == STATUS_ACTIVITY:
@@ -139,15 +144,18 @@ class Calibrator:
             self.sleeper(min(self.check_interval, (deadline - self.clock()).total_seconds()))
             newer = self.adapter.detect_activity()
             if newer.status == STATUS_ACTIVITY and (known_at is None or newer.at > known_at):
-                # Newer, reliably-detected activity reschedules the deadline
-                # forward. "none" and "unreliable" never do this: a boundary
-                # search that used bad/missing activity data to shorten or
-                # skip the wait would risk an unwarranted probe.
-                known_at = newer.at
-                deadline = newer.at + dt.timedelta(seconds=interval)
-                self._record("activity-detected", self.clock(), source=newer.source,
-                             scheduled_at=iso(deadline))
-                self._emit_wait(on_wait, interval, deadline, "rescheduled")
+                if floor_at_least is not None and newer.at <= floor_at_least:
+                    known_at = newer.at
+                else:
+                    # Newer, reliably-detected activity reschedules the deadline
+                    # forward. "none" and "unreliable" never do this: a boundary
+                    # search that used bad/missing activity data to shorten or
+                    # skip the wait would risk an unwarranted probe.
+                    known_at = newer.at
+                    deadline = newer.at + dt.timedelta(seconds=interval)
+                    self._record("activity-detected", self.clock(), source=newer.source,
+                                 scheduled_at=iso(deadline))
+                    self._emit_wait(on_wait, interval, deadline, "rescheduled")
             elif newer.status == STATUS_UNRELIABLE:
                 # Fail-closed retry: an unreliable check is never silently
                 # read as "no activity". It changes nothing about the
@@ -168,13 +176,15 @@ class Calibrator:
         now = self.clock()
         self._record("run-started", now, resumed=resumed)
         completed = 0
+        resume_floor = now if resumed else None
         while max_measurements is None or completed < max_measurements:
             sampling = state["sampling"]
             startup = not sampling["startup_complete"]
             interval = None if startup else int(sampling["next_interval_seconds"])
             wait_info = None
             if not startup:
-                wait_info = self._wait_for_interval(sampling, interval, on_wait=on_wait)
+                wait_info = self._wait_for_interval(
+                    sampling, interval, on_wait=on_wait, floor_at_least=resume_floor)
             observation = self.adapter.probe()
             finished = self.clock()
             assessment = self.adapter.assess(observation, state.get("baseline", {}), startup=startup)
@@ -224,6 +234,7 @@ class Calibrator:
                 sampling["startup_complete"] = True
             else:
                 completed += 1
+                resume_floor = None
             state["updated_at"] = iso(finished)
             save_state(self.state_path, state)
             # The next quiet interval starts at probe completion, even if the
