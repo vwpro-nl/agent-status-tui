@@ -56,6 +56,21 @@ def render_header() -> str:
     return f"{'TIME':<8}  {'AGENT':<8} {'INTERVAL':<9} {labels}  NEXT"
 
 
+def render_monitor_header() -> str:
+    labels = "  ".join(f"{label:<8}" for _, label in DISPLAY_COLUMNS)
+    return f"{'AGENT':<8} {'INTERVAL':<9} {'MODE':<8} {'CLASS':<8} {labels}  NEXT"
+
+
+def render_monitor_row(display_name: str, *, interval_text: str, mode: str,
+                       classification: str, values: dict[str, Any],
+                       next_at: dt.datetime | None) -> str:
+    """One read-only monitor row. Missing data renders as ``-``, never guessed."""
+    metrics = "  ".join(f"{str(_metric(values, key)):<8}" for key, _ in DISPLAY_COLUMNS)
+    next_text = next_at.astimezone().strftime("%H:%M:%S") if next_at else "-"
+    return (f"{display_name:<8} {interval_text:<9} {mode:<8} {classification:<8} "
+            f"{metrics}  {next_text}")
+
+
 def _metric(values: dict[str, Any], key: str) -> Any:
     if key in values:
         return values[key]
