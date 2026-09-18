@@ -7,7 +7,7 @@ import datetime as dt
 import shlex
 from pathlib import Path
 
-from .adapters import ClaudeCalibratorAdapter
+from .adapters import ClaudeCalibratorAdapter, CodexCalibratorAdapter
 from .core import Calibrator
 from .persistence import load_history, load_state
 from .render import chronological, render_header, render_record
@@ -21,29 +21,43 @@ def default_root() -> Path:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="agent-status-tui calibrator")
     parser.add_argument("action", nargs="?", choices=("run", "status", "history"), default="run")
-    parser.add_argument("--agent", choices=("claude",), default="claude")
-    parser.add_argument("--model", default="sonnet")
+    parser.add_argument("--agent", choices=("claude", "codex"), default="claude")
+    parser.add_argument("--model", help="provider model (required for Codex run; Claude defaults to sonnet)")
     parser.add_argument("--prompt", default="Reply only: OK")
-    parser.add_argument("--claude-command", default="claude")
-    parser.add_argument("--ccusage-command", default="npx --yes ccusage@latest claude blocks --active --json")
-    parser.add_argument("--projects-dir", type=Path, default=Path.home() / ".claude/projects")
+    claude = parser.add_argument_group("Claude options")
+    claude.add_argument("--claude-command", default="claude")
+    claude.add_argument("--ccusage-command", default="npx --yes ccusage@latest claude blocks --active --json")
+    claude.add_argument("--projects-dir", type=Path, default=Path.home() / ".claude/projects")
+    claude.add_argument("--startup-baseline", action="store_true",
+                        help="allow a suitable Claude startup measurement to seed its baseline")
+    codex = parser.add_argument_group("Codex options")
+    codex.add_argument("--codex-command", default="codex")
+    codex.add_argument("--codex-home", type=Path, default=Path.home() / ".codex")
+    codex.add_argument("--scratch-dir", type=Path,
+                       help="parent for the temporary read-only Codex probe workspace")
     parser.add_argument("--state-dir", type=Path, default=default_root())
     parser.add_argument("--check-interval", type=float, default=60)
     parser.add_argument("--max-measurements", type=int)
-    parser.add_argument("--startup-baseline", action="store_true",
-                        help="allow a suitable startup measurement to seed the hot/cheap baseline")
     args = parser.parse_args(argv)
+    if args.agent == "codex" and args.action == "run" and not args.model:
+        parser.error("--model is required for a Codex calibrator run")
     state_path = args.state_dir / "states" / f"{args.agent}.json"
     # Per-agent history: each agent gets its own append-only file, so no
     # shared writer/lock is needed across agents. A future multi-agent view
     # merges these chronologically via persistence.load_histories().
     history_path = args.state_dir / "history" / f"{args.agent}.jsonl"
-    adapter = ClaudeCalibratorAdapter(
-        args.projects_dir, model=args.model, prompt=args.prompt,
-        claude_command=shlex.split(args.claude_command),
-        ccusage_command=shlex.split(args.ccusage_command),
-        history_path=history_path, startup_baseline=args.startup_baseline,
-    )
+    if args.agent == "codex":
+        adapter = CodexCalibratorAdapter(
+            args.codex_home, model=args.model or "unused", prompt=args.prompt,
+            codex_command=shlex.split(args.codex_command), scratch_root=args.scratch_dir,
+        )
+    else:
+        adapter = ClaudeCalibratorAdapter(
+            args.projects_dir, model=args.model or "sonnet", prompt=args.prompt,
+            claude_command=shlex.split(args.claude_command),
+            ccusage_command=shlex.split(args.ccusage_command),
+            history_path=history_path, startup_baseline=args.startup_baseline,
+        )
     if args.action == "status":
         state = load_state(state_path)
         print("No calibrator state." if state is None else
