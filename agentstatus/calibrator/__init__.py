@@ -4,6 +4,6 @@ Nothing in this package is imported by the normal status collection path.
 """
 
 from .core import Calibrator, CalibratorError
-from .model import Activity, Adapter, Assessment, Observation
+from .model import ActivityResult, Adapter, Assessment, Observation
 
-__all__ = ["Activity", "Adapter", "Assessment", "Calibrator", "CalibratorError", "Observation"]
+__all__ = ["ActivityResult", "Adapter", "Assessment", "Calibrator", "CalibratorError", "Observation"]

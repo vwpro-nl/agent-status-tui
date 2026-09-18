@@ -67,6 +67,27 @@ class CliTests(unittest.TestCase):
         import inspect
         self.assertIn('effective_argv[0] == "calibrator"', inspect.getsource(cli.main))
 
+    def test_normal_status_route_never_imports_calibrator_module(self):
+        # A real, isolated-interpreter check: any calibrator submodule
+        # already sitting in sys.modules from another test file would make
+        # an in-process check meaningless, so this runs the normal status
+        # route in a fresh subprocess and inspects sys.modules there.
+        import subprocess
+        import sys
+        script = (
+            "import sys\n"
+            "sys.path.insert(0, %r)\n"
+            "from agentstatus import cli\n"
+            "cli.collect = lambda env, now, previous=None: []\n"
+            "cli.main(['--once'])\n"
+            "assert not any(name == 'agentstatus.calibrator' or name.startswith('agentstatus.calibrator.') "
+            "for name in sys.modules), sorted(sys.modules)\n"
+            "print('OK')\n"
+        ) % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("OK", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

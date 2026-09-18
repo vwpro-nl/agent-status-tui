@@ -6,9 +6,14 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
-STATE_SCHEMA = "agent-status-calibrator-state/v1"
+# v2 nests state into three conceptually distinct sections: "sampling" (the
+# explorer ladder), "baseline" (adapter-owned provider assessment) and
+# "controller" (reserved, opaque, for a future strategy layer). See
+# agentstatus/calibrator/model.py for the full rationale.
+STATE_SCHEMA = "agent-status-calibrator-state/v2"
+CONTROLLER_STATE_SCHEMA = "agent-status-calibrator-controller-state/v1"
 HISTORY_SCHEMA = "agent-status-calibrator-history/v1"
 
 
@@ -79,4 +84,19 @@ def load_history(path: Path) -> list[dict[str, Any]]:
         if not isinstance(value, dict) or value.get("schema") != HISTORY_SCHEMA:
             raise PersistenceError(f"unsupported calibrator history line {number}")
         records.append(value)
+    return records
+
+
+def load_histories(paths: Iterable[Path]) -> list[dict[str, Any]]:
+    """Load and concatenate several per-agent history files.
+
+    Each agent's history lives in its own file (no shared writer, no locking
+    across agents). This is the seam a future chronological, multi-agent
+    presentation merges through: callers sort the combined result themselves
+    (see ``render.chronological``), this function only avoids re-reading and
+    re-parsing each file per caller.
+    """
+    records: list[dict[str, Any]] = []
+    for path in paths:
+        records.extend(load_history(path))
     return records

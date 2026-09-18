@@ -4,8 +4,8 @@ import unittest
 from pathlib import Path
 
 from agentstatus.calibrator.core import Calibrator, VIRGIN_INTERVALS
-from agentstatus.calibrator.model import Activity, Assessment, Observation
-from agentstatus.calibrator.persistence import load_history, load_state
+from agentstatus.calibrator.model import ActivityResult, Assessment, Observation
+from agentstatus.calibrator.persistence import load_histories, load_history, load_state
 from agentstatus.calibrator.render import chronological, interval_label, render_record
 
 
@@ -28,19 +28,36 @@ class FakeAdapter:
     measurement_schema = "test/v1"
     display_columns = (("count", "COUNT"),)
 
-    def __init__(self, clock, validity=None):
+    def __init__(self, clock, validity=None, classifications=None, update_baseline=None):
         self.clock = clock
         self.validity = iter(validity or [])
+        self.classifications = iter(classifications or [])
+        self.update_baseline = iter(update_baseline or [])
         self.probes = 0
     def detect_activity(self):
-        return Activity(self.clock.value - dt.timedelta(days=1), "fixture")
+        return ActivityResult("activity", self.clock.value - dt.timedelta(days=1), reliable_checks=1,
+                              source="fixture")
     def probe(self):
         self.probes += 1
         self.clock.value += dt.timedelta(seconds=7)
         valid = next(self.validity, True)
         return Observation(valid, f"m-{self.probes}", {"count": self.probes}, {"count": self.probes}, None if valid else "failed")
-    def assess(self, observation, baseline):
-        return Assessment("good" if observation.valid else "fail", {"seen": self.probes})
+    def assess(self, observation, baseline, *, startup=False):
+        if not observation.valid:
+            return Assessment("fail", baseline, update_baseline=False)
+        classification = next(self.classifications, "good")
+        update = next(self.update_baseline, classification == "good")
+        return Assessment(classification, {"seen": self.probes} if update else dict(baseline), update)
+
+
+class ScriptedActivityAdapter(FakeAdapter):
+    """FakeAdapter whose detect_activity() replays a fixed script."""
+
+    def __init__(self, clock, script):
+        super().__init__(clock)
+        self.script = iter(script)
+    def detect_activity(self):
+        return next(self.script)
 
 
 class CalibratorTests(unittest.TestCase):
@@ -54,9 +71,9 @@ class CalibratorTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def runner(self):
-        return Calibrator(self.adapter, self.state, self.history, clock=self.clock,
-                          sleeper=self.clock.sleep, check_interval=30)
+    def runner(self, adapter=None, check_interval=30):
+        return Calibrator(adapter or self.adapter, self.state, self.history, clock=self.clock,
+                          sleeper=self.clock.sleep, check_interval=check_interval)
 
     def measurements(self):
         return [r for r in load_history(self.history) if r["event"] == "measurement"]
@@ -72,8 +89,8 @@ class CalibratorTests(unittest.TestCase):
     def test_restart_between_two_one_minute_measurements(self):
         self.runner().run(max_measurements=1)
         first_state = load_state(self.state)
-        self.assertEqual(first_state["progress"], 1)
-        self.assertEqual(first_state["next_interval_seconds"], 60)
+        self.assertEqual(first_state["sampling"]["progress"], 1)
+        self.assertEqual(first_state["sampling"]["next_interval_seconds"], 60)
         self.runner().run(max_measurements=1)
         self.assertEqual([r["interval_seconds"] for r in self.measurements()], [None, 60, 60])
 
@@ -87,8 +104,8 @@ class CalibratorTests(unittest.TestCase):
         self.adapter = FakeAdapter(self.clock, [True, False])
         self.assertEqual(self.runner().run(max_measurements=1), 1)
         state = load_state(self.state)
-        self.assertEqual(state["progress"], 0)
-        self.assertEqual(state["next_interval_seconds"], 60)
+        self.assertEqual(state["sampling"]["progress"], 0)
+        self.assertEqual(state["sampling"]["next_interval_seconds"], 60)
 
     def test_next_is_computed_from_probe_end(self):
         shown = []
@@ -120,8 +137,197 @@ class CalibratorTests(unittest.TestCase):
         other_state = self.state.with_name("other.json")
         Calibrator(other, other_state, self.history, clock=self.clock,
                    sleeper=self.clock.sleep).run(max_measurements=2)
-        self.assertEqual(load_state(self.state)["progress"], 1)
-        self.assertEqual(load_state(other_state)["progress"], 2)
+        self.assertEqual(load_state(self.state)["sampling"]["progress"], 1)
+        self.assertEqual(load_state(other_state)["sampling"]["progress"], 2)
+
+    def test_two_calibrator_instances_do_not_mix_state_or_history(self):
+        """Two agents run through two independent Calibrator instances, each
+        with its own state and history file (per-agent, no shared writer)."""
+        other = FakeAdapter(self.clock)
+        other.agent = "other-agent"
+        other.provider = "other-provider"
+        other.measurement_schema = "other/v1"
+        other_state = self.state.with_name("other.json")
+        other_history = self.history.with_name("other-history.jsonl")
+
+        self.runner().run(max_measurements=2)
+        Calibrator(other, other_state, other_history, clock=self.clock,
+                   sleeper=self.clock.sleep).run(max_measurements=3)
+
+        mine = self.measurements()
+        theirs = [r for r in load_history(other_history) if r["event"] == "measurement"]
+        # Each run(max_measurements=N) records the startup measurement plus
+        # N interval measurements.
+        self.assertEqual(len(mine), 3)
+        self.assertEqual(len(theirs), 4)
+        self.assertTrue(all(r["agent"] == "test-agent" for r in mine))
+        self.assertTrue(all(r["agent"] == "other-agent" for r in theirs))
+        # Each agent's own file never contains the other agent's records.
+        self.assertFalse(any(r["agent"] == "other-agent" for r in mine))
+        self.assertFalse(any(r["agent"] == "test-agent" for r in theirs))
+        # State never crosses over either.
+        self.assertEqual(load_state(self.state)["agent"], "test-agent")
+        self.assertEqual(load_state(other_state)["agent"], "other-agent")
+
+    def test_per_agent_histories_merge_chronologically(self):
+        other = FakeAdapter(self.clock)
+        other.agent = "other-agent"
+        other_state = self.state.with_name("other.json")
+        other_history = self.history.with_name("other-history.jsonl")
+
+        self.runner().run(max_measurements=2)
+        Calibrator(other, other_state, other_history, clock=self.clock,
+                   sleeper=self.clock.sleep).run(max_measurements=2)
+
+        merged = chronological(load_histories([self.history, other_history]))
+        timestamps = [r["timestamp"] for r in merged]
+        self.assertEqual(timestamps, sorted(timestamps))
+        agents = {r["agent"] for r in merged}
+        self.assertEqual(agents, {"test-agent", "other-agent"})
+
+    def test_controller_state_is_reserved_and_left_untouched(self):
+        self.runner().run(max_measurements=1)
+        state = load_state(self.state)
+        self.assertIn("controller", state)
+        self.assertIn("schema", state["controller"])
+        before = dict(state["controller"])
+        self.runner().run(max_measurements=1)
+        after = load_state(self.state)["controller"]
+        self.assertEqual(before, after)
+
+    # -- baseline contract (generic: the core only ever respects the flag) --
+    #
+    # FakeAdapter.assess() is called for the startup measurement too (every
+    # run(max_measurements=1) call performs startup *and* the first interval
+    # measurement in one call, since startup itself doesn't count towards
+    # max_measurements). Scripts below always cover startup first, with
+    # update_baseline=False for it, matching "startup only updates the
+    # baseline when explicitly told to" -- exercised precisely in
+    # test_calibrator_claude.py.
+
+    def test_good_classification_advances_ladder(self):
+        self.adapter = FakeAdapter(self.clock, classifications=["good", "good"],
+                                   update_baseline=[False, True])
+        self.runner().run(max_measurements=1)
+        self.assertEqual(load_state(self.state)["sampling"]["progress"], 1)
+
+    def test_bad_classification_advances_ladder_without_updating_baseline(self):
+        self.adapter = FakeAdapter(self.clock, classifications=["good", "bad"],
+                                   update_baseline=[False, False])
+        self.runner().run(max_measurements=1)
+        state = load_state(self.state)
+        self.assertEqual(state["sampling"]["progress"], 1)
+        self.assertEqual(state["baseline"], {})
+
+    def test_init_classification_advances_ladder_without_updating_baseline(self):
+        self.adapter = FakeAdapter(self.clock, classifications=["good", "init"],
+                                   update_baseline=[False, False])
+        self.runner().run(max_measurements=1)
+        state = load_state(self.state)
+        self.assertEqual(state["sampling"]["progress"], 1)
+        self.assertEqual(state["baseline"], {})
+
+    def test_fail_does_not_advance_ladder(self):
+        self.adapter = FakeAdapter(self.clock, validity=[True, False])
+        self.assertEqual(self.runner().run(max_measurements=1), 1)
+        state = load_state(self.state)
+        self.assertEqual(state["sampling"]["progress"], 0)
+
+    def test_invalid_does_not_advance_ladder(self):
+        self.adapter = FakeAdapter(self.clock, validity=[True, False], update_baseline=[False])
+        self.assertEqual(self.runner().run(max_measurements=1), 1)
+        state = load_state(self.state)
+        self.assertEqual(state["sampling"]["progress"], 0)
+        self.assertEqual(state["baseline"], {})
+
+    def test_core_only_writes_baseline_when_assessment_flags_update(self):
+        self.adapter = FakeAdapter(self.clock, classifications=["good", "good", "bad"],
+                                   update_baseline=[False, True, False])
+        self.runner().run(max_measurements=2)
+        # The first (startup) measurement never updates (flagged False). The
+        # following "good" interval measurement updates the baseline; the
+        # "bad" one after it must not overwrite it.
+        state = load_state(self.state)
+        self.assertEqual(state["baseline"], {"seen": 2})
+
+    # -- activity model / scheduler semantics --
+
+    def test_activity_reschedules_deadline(self):
+        early = ActivityResult("activity", self.clock.value - dt.timedelta(seconds=200), reliable_checks=1)
+        later = ActivityResult("activity", self.clock.value + dt.timedelta(seconds=500), reliable_checks=1)
+        # First measurement is the free startup sample; script covers the
+        # following interval-based wait: initial check, then a rescheduling
+        # tick, then enough "later" checks to actually reach the deadline.
+        script = [early] + [later] * 40
+        self.adapter = ScriptedActivityAdapter(self.clock, script)
+        shown = []
+        self.runner(check_interval=30).run(max_measurements=1, emit=shown.append)
+        events = load_history(self.history)
+        self.assertTrue(any(e["event"] == "activity-detected" for e in events))
+        second = shown[1]
+        finished = dt.datetime.fromisoformat(second["timestamp"].replace("Z", "+00:00"))
+        # The probe could only fire once the clock passed the rescheduled
+        # deadline (later.at + 60s), well past the naive early.at + 60s.
+        self.assertGreaterEqual(finished, later.at)
+
+    def test_reliable_none_uses_probe_floor_not_epoch_or_idle(self):
+        script = [ActivityResult("none", reliable_checks=2)] * 10
+        self.adapter = ScriptedActivityAdapter(self.clock, script)
+        start = self.clock.value
+        shown = []
+        self.runner(check_interval=30).run(max_measurements=2, emit=shown.append)
+        second = shown[1]
+        finished = dt.datetime.fromisoformat(second["timestamp"].replace("Z", "+00:00"))
+        first_finished = dt.datetime.fromisoformat(shown[0]["timestamp"].replace("Z", "+00:00"))
+        # Anchored on the probe-floor (the first measurement's finish time),
+        # not on epoch (which would already be far in the past and cause an
+        # immediate probe) and not on any invented "idle" timestamp.
+        self.assertGreaterEqual(finished, first_finished)
+        self.assertGreater(finished, start)
+        events = load_history(self.history)
+        self.assertFalse(any(e["event"] == "activity-unreliable" for e in events))
+        self.assertFalse(any(e["event"] == "activity-detected" for e in events))
+
+    def test_unreliable_activity_is_never_treated_as_none(self):
+        script = [ActivityResult("unreliable", failed_checks=("tool-x: boom",))] * 10
+        self.adapter = ScriptedActivityAdapter(self.clock, script)
+        first_finish_floor = None
+        shown = []
+        rc = self.runner(check_interval=30).run(max_measurements=2, emit=shown.append)
+        self.assertEqual(rc, 0)
+        events = load_history(self.history)
+        unreliable_events = [e for e in events if e["event"] == "activity-unreliable"]
+        self.assertTrue(unreliable_events, "unreliable checks must be recorded, distinctly from none")
+        self.assertEqual(unreliable_events[0]["failed_checks"], ["tool-x: boom"])
+        # Fail-closed: no reschedule event, and the probe still only fires
+        # at (or after) probe-floor + interval -- never immediately/early.
+        self.assertFalse(any(e["event"] == "activity-detected" for e in events))
+        first_finished = dt.datetime.fromisoformat(shown[0]["timestamp"].replace("Z", "+00:00"))
+        second_finished = dt.datetime.fromisoformat(shown[1]["timestamp"].replace("Z", "+00:00"))
+        self.assertGreaterEqual((second_finished - first_finished).total_seconds(), 60)
+
+    def test_probe_floor_falls_back_to_now_not_epoch_when_unset(self):
+        calibrator = self.runner()
+        self.assertEqual(calibrator._probe_floor({"last_probe_finished_at": None}), self.clock())
+
+    def test_unreliable_does_not_cause_unwarranted_immediate_probe(self):
+        # Craft a resumed state that is past startup but has no persisted
+        # probe-floor -- an edge case a real run never produces (startup
+        # always sets it first), exercised directly here to prove the
+        # "no floor" fallback can't be exploited into an unwarranted probe.
+        from agentstatus.calibrator.core import initial_state
+        from agentstatus.calibrator.persistence import save_state
+        state = initial_state(self.adapter)
+        state["sampling"]["startup_complete"] = True
+        state["sampling"]["next_interval_seconds"] = 60
+        save_state(self.state, state)
+        self.adapter = ScriptedActivityAdapter(
+            self.clock, [ActivityResult("unreliable", failed_checks=("x",))] * 5)
+        start = self.clock()
+        shown = []
+        self.runner(check_interval=30).run(max_measurements=1, emit=shown.append)
+        finished = dt.datetime.fromisoformat(shown[0]["timestamp"].replace("Z", "+00:00"))
+        self.assertGreaterEqual((finished - start).total_seconds(), 60)
 
 
 if __name__ == "__main__":

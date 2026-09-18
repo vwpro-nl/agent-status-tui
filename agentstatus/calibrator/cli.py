@@ -30,18 +30,25 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--state-dir", type=Path, default=default_root())
     parser.add_argument("--check-interval", type=float, default=60)
     parser.add_argument("--max-measurements", type=int)
+    parser.add_argument("--startup-baseline", action="store_true",
+                        help="allow a suitable startup measurement to seed the hot/cheap baseline")
     args = parser.parse_args(argv)
     state_path = args.state_dir / "states" / f"{args.agent}.json"
-    history_path = args.state_dir / "history.jsonl"
+    # Per-agent history: each agent gets its own append-only file, so no
+    # shared writer/lock is needed across agents. A future multi-agent view
+    # merges these chronologically via persistence.load_histories().
+    history_path = args.state_dir / "history" / f"{args.agent}.jsonl"
     adapter = ClaudeCalibratorAdapter(
         args.projects_dir, model=args.model, prompt=args.prompt,
         claude_command=shlex.split(args.claude_command),
         ccusage_command=shlex.split(args.ccusage_command),
+        history_path=history_path, startup_baseline=args.startup_baseline,
     )
     if args.action == "status":
         state = load_state(state_path)
         print("No calibrator state." if state is None else
-              f"{adapter.display_name} next={state['next_interval_seconds'] // 60}m progress={state['progress']}")
+              f"{adapter.display_name} next={state['sampling']['next_interval_seconds'] // 60}m "
+              f"progress={state['sampling']['progress']}")
         return 0
     if args.action == "history":
         print(render_header(adapter.display_columns))

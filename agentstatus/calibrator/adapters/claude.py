@@ -12,7 +12,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from ..model import Activity, Assessment, Observation
+from ..model import STATUS_ACTIVITY, STATUS_NONE, STATUS_UNRELIABLE, ActivityResult, Assessment, Observation
+from ..persistence import PersistenceError, load_history
 
 TOKEN_FIELDS = ("inputTokens", "outputTokens", "cacheCreationInputTokens",
                 "cacheReadInputTokens", "totalTokens")
@@ -115,20 +116,39 @@ class ClaudeCalibratorAdapter:
     def __init__(self, projects_dir: Path, *, model: str = "sonnet",
                  prompt: str = "Reply only: OK", claude_command: list[str] | None = None,
                  ccusage_command: list[str] | None = None,
-                 runner: Callable[[list[str]], subprocess.CompletedProcess[str]] = run_command):
+                 runner: Callable[[list[str]], subprocess.CompletedProcess[str]] = run_command,
+                 history_path: Path | None = None, startup_baseline: bool = False):
         self.projects_dir = projects_dir
         self.model = model
         self.prompt = prompt
         self.claude_command = list(claude_command or ["claude"])
         self.ccusage_command = list(ccusage_command or CCUSAGE_COMMAND)
         self.runner = runner
+        # Optional read-only fallback source for activity detection: this
+        # adapter's own measurement history. Ownership of the history file
+        # (writing, rotation) stays entirely with the calibrator core; this
+        # is the one place a provider adapter is allowed to read it back.
+        self.history_path = history_path
+        # Explicit, operator-set contract: a "good"-looking startup sample
+        # only seeds the hot/cheap baseline when this is True. Without it,
+        # the very first-ever measurement (against an empty baseline, hence
+        # trivially passing the "good" thresholds) never seeds the baseline
+        # on its own -- see assess().
+        self.startup_baseline = startup_baseline
 
-    def detect_activity(self) -> Activity:
-        candidates: list[tuple[dt.datetime, str]] = []
-        errors = []
+    def _latest_transcript_activity(self) -> dt.datetime | None:
+        """Latest timestamped assistant response with non-zero model usage.
+
+        The leading activity source: unlike file mtimes or user messages, it
+        identifies a completed, billable model response. Unrelated malformed
+        JSONL lines are ignored; a directory/read failure raises so the
+        caller can count this source as unreliable rather than silently
+        reporting "no activity".
+        """
+        if not self.projects_dir.is_dir():
+            raise ClaudeProbeError(f"Claude projects directory unavailable: {self.projects_dir}")
+        latest: dt.datetime | None = None
         try:
-            if not self.projects_dir.is_dir():
-                raise ClaudeProbeError(f"Claude projects directory unavailable: {self.projects_dir}")
             for path in self.projects_dir.rglob("*.jsonl"):
                 with path.open(encoding="utf-8", errors="replace") as handle:
                     for line in handle:
@@ -142,26 +162,68 @@ class ClaudeCalibratorAdapter:
                         if any(isinstance(usage.get(k), (int, float)) and not isinstance(usage.get(k), bool)
                                and usage[k] > 0 for k in fields):
                             stamp = _aware(entry.get("timestamp"))
-                            if stamp:
-                                candidates.append((stamp, "claude-transcript"))
-        except (OSError, json.JSONDecodeError, ClaudeProbeError) as exc:
-            errors.append(str(exc))
+                            if stamp is not None and (latest is None or stamp > latest):
+                                latest = stamp
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ClaudeProbeError(f"could not scan Claude projects: {exc}") from exc
+        return latest
+
+    def _latest_ccusage_activity(self) -> dt.datetime | None:
+        result = self.runner(self.ccusage_command)
+        if result.returncode:
+            raise ClaudeProbeError("ccusage activity check failed")
         try:
-            result = self.runner(self.ccusage_command)
-            if result.returncode:
-                raise ClaudeProbeError("ccusage activity check failed")
             data = json.loads(result.stdout)
-            if not isinstance(data, dict) or not isinstance(data.get("blocks"), list):
-                raise ClaudeProbeError("ccusage activity JSON has no blocks array")
-            candidates.extend((stamp, "ccusage-actualEndTime") for block in data["blocks"]
-                              if isinstance(block, dict)
-                              for stamp in [_aware(block.get("actualEndTime"))] if stamp)
-        except (json.JSONDecodeError, ClaudeProbeError) as exc:
-            errors.append(str(exc))
+        except json.JSONDecodeError as exc:
+            raise ClaudeProbeError(f"ccusage activity check returned malformed JSON: {exc}") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("blocks"), list):
+            raise ClaudeProbeError("ccusage activity JSON has no blocks array")
+        timestamps = [stamp for block in data["blocks"] if isinstance(block, dict)
+                     for stamp in [_aware(block.get("actualEndTime"))] if stamp is not None]
+        return max(timestamps) if timestamps else None
+
+    def _latest_probe_activity(self) -> dt.datetime | None:
+        assert self.history_path is not None
+        timestamps = [stamp for record in load_history(self.history_path)
+                     if record.get("event") == "measurement" and record.get("valid") is True
+                     for stamp in [_aware(record.get("timestamp"))] if stamp is not None]
+        return max(timestamps) if timestamps else None
+
+    def detect_activity(self) -> ActivityResult:
+        candidates: list[tuple[dt.datetime, str]] = []
+        failed_checks: list[str] = []
+        reliable_checks = 0
+        try:
+            transcript = self._latest_transcript_activity()
+            reliable_checks += 1
+            if transcript is not None:
+                candidates.append((transcript, "claude-transcript"))
+        except ClaudeProbeError as exc:
+            failed_checks.append(f"claude-transcript: {exc}")
+        try:
+            ccusage = self._latest_ccusage_activity()
+            reliable_checks += 1
+            if ccusage is not None:
+                candidates.append((ccusage, "ccusage-actualEndTime"))
+        except ClaudeProbeError as exc:
+            failed_checks.append(f"ccusage-actualEndTime: {exc}")
+        # Probe-log is a compatibility fallback only: it never counts toward
+        # reliable_checks, and can never by itself turn an otherwise
+        # unreliable check into a reliable one.
+        if self.history_path is not None:
+            try:
+                probe = self._latest_probe_activity()
+                if probe is not None:
+                    candidates.append((probe, "probe-log"))
+            except PersistenceError as exc:
+                failed_checks.append(f"probe-log: {exc}")
+        if reliable_checks == 0:
+            return ActivityResult(STATUS_UNRELIABLE, reliable_checks=0, failed_checks=tuple(failed_checks))
         if not candidates:
-            raise ClaudeProbeError("activity time cannot be established reliably: " + "; ".join(errors))
-        stamp, source = max(candidates)
-        return Activity(stamp, source)
+            return ActivityResult(STATUS_NONE, reliable_checks=reliable_checks, failed_checks=tuple(failed_checks))
+        at, source = max(candidates, key=lambda item: item[0])
+        return ActivityResult(STATUS_ACTIVITY, at=at, reliable_checks=reliable_checks,
+                              failed_checks=tuple(failed_checks), source=source)
 
     def probe(self) -> Observation:
         measurement_id = str(uuid.uuid4())
@@ -191,11 +253,9 @@ class ClaudeCalibratorAdapter:
         except (ClaudeProbeError, OSError) as exc:
             return Observation(False, measurement_id, error=str(exc))
 
-    def assess(self, observation: Observation, baseline: Mapping[str, Any]) -> Assessment:
-        if not observation.valid:
-            return Assessment("fail", baseline)
-        values = observation.values
-        classification = "init" if values.get("initial_block") else "good"
+    def _classify(self, values: Mapping[str, Any], baseline: Mapping[str, Any]) -> str:
+        if values.get("initial_block"):
+            return "init"
         create = float(values.get("cache_create_tokens") or 0)
         total = float(values.get("total_tokens") or 0)
         expected_create = float(baseline.get("cache_create_tokens") or 0)
@@ -203,14 +263,34 @@ class ClaudeCalibratorAdapter:
         threshold = max(CREATE_NOISE_FLOOR, expected_create + CREATE_FRACTION * expected_total)
         cost = float(values.get("cost_usd") or 0)
         expected_cost = baseline.get("cost_usd")
-        if classification != "init" and (create > threshold or
-                (expected_cost not in (None, 0) and create > CREATE_NOISE_FLOOR
-                 and cost > float(expected_cost) * COST_MULTIPLIER)):
-            classification = "bad"
+        if create > threshold or (expected_cost not in (None, 0) and create > CREATE_NOISE_FLOOR
+                                  and cost > float(expected_cost) * COST_MULTIPLIER):
+            return "bad"
+        return "good"
+
+    def _blend(self, baseline: Mapping[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
         updated = dict(baseline)
         for key in ("cache_create_tokens", "cache_read_tokens", "total_tokens", "cost_usd"):
             observed = values.get(key)
             if observed is not None:
                 prior = baseline.get(key)
                 updated[key] = float(observed) if prior is None else ((1 - BASELINE_ALPHA) * float(prior) + BASELINE_ALPHA * float(observed))
-        return Assessment(classification, updated)
+        return updated
+
+    def assess(self, observation: Observation, baseline: Mapping[str, Any],
+               *, startup: bool = False) -> Assessment:
+        if not observation.valid:
+            return Assessment("fail", dict(baseline), update_baseline=False)
+        values = observation.values
+        classification = self._classify(values, baseline)
+        # Only a "good" sample ever volunteers to move the baseline: bad and
+        # init never do, and this is unconditional -- see model.Assessment.
+        update_baseline = classification == "good"
+        if startup and update_baseline and not self.startup_baseline:
+            # A first-ever measurement is classified against an empty
+            # baseline, so "good" is nearly automatic and proves nothing.
+            # Seeding the hot/cheap baseline from it requires the operator's
+            # explicit opt-in.
+            update_baseline = False
+        baseline_out = self._blend(baseline, values) if update_baseline else dict(baseline)
+        return Assessment(classification, baseline_out, update_baseline)
