@@ -57,3 +57,51 @@ identifiers into any tracked file.
 
 Do not commit or push unless a task explicitly authorizes it. When authorized,
 keep messages factual and free of tooling attribution.
+
+## Agent workflow
+
+Work autonomously until the assigned task is technically complete.
+
+- Do not ask questions about normal implementation choices, internal structure,
+  tests, or preferences when they can reasonably be inferred from the task,
+  repository, reference projects, existing tests, or safe project defaults.
+- Make safe implementation decisions independently and report them afterward.
+- Stop and ask only for a genuine blocker: required information that cannot be
+  inferred, missing credentials or access, a destructive or irreversible
+  action, or materially different external consequences that require a human
+  decision.
+- Do not ask "shall I continue?", present routine choice menus, or request
+  intermediate permission for ordinary repository work.
+- Run the relevant tests and validation checks before reporting completion.
+- Do not commit or push unless the task explicitly authorizes it.
+
+### Task identifiers
+
+Every agent task must be given a TASK-ID containing a unique date and time
+component. Preserve that TASK-ID in progress messages and the final report.
+
+TASK-IDs are operational metadata only. Never write them into tracked project
+files, source code, tests, documentation, commits, or other permanent project
+material.
+
+### ETA and progress
+
+After initial inspection, provide an ETA as soon as the remaining scope can
+reasonably be estimated. Do not invent an ETA before enough information is
+available.
+
+Show the estimate prominently:
+
+*** ETA: approximately 25 minutes ***
+
+Continue working after reporting the ETA; it is progress information, not a
+request for permission.
+
+Continuously compare actual progress with the last reported estimate. If the
+expected completion time or remaining duration changes by approximately 10%
+or more, report the revision immediately and prominently:
+
+*** ETA REVISED: approximately 35 minutes (was 25 minutes) ***
+
+Briefly state the concrete reason for the revision and continue working.
+Do not postpone a required ETA revision until the final report.
