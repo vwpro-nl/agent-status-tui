@@ -90,18 +90,22 @@ After initial inspection, provide an ETA as soon as the remaining scope can
 reasonably be estimated. Do not invent an ETA before enough information is
 available.
 
-Show the estimate prominently:
+Show both the estimated local completion time and estimated remaining duration
+prominently:
 
-*** ETA: approximately 25 minutes ***
+*** ETA: 12:35 (25m) ***
 
 Continue working after reporting the ETA; it is progress information, not a
 request for permission.
 
 Continuously compare actual progress with the last reported estimate. If the
-expected completion time or remaining duration changes by approximately 10%
+expected completion time or remaining duration changes by 10%
 or more, report the revision immediately and prominently:
 
-*** ETA REVISED: approximately 35 minutes (was 25 minutes) ***
+*** ETA REVISED: 12:45 (~~25m~~ 35m) ***
 
-Briefly state the concrete reason for the revision and continue working.
+Use the local time of the execution environment for the completion time. The
+duration in parentheses is the estimated remaining duration when reported. On
+revision, strike through the previous duration as shown. Briefly state the
+concrete reason for the revision and continue working.
 Do not postpone a required ETA revision until the final report.
