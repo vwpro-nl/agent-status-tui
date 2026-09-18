@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .controller import (
-    apply as apply_controller, controller_schema_is_current, empty_controller,
+    MODE_DONE, apply as apply_controller, controller_schema_is_current, empty_controller,
     ensure_controller, migrate_legacy_controller,
 )
 from .model import STATUS_ACTIVITY, STATUS_UNRELIABLE, Adapter
@@ -175,6 +175,10 @@ class Calibrator:
         state, resumed = self.load()
         now = self.clock()
         self._record("run-started", now, resumed=resumed)
+        if (state.get("controller") or {}).get("mode") == MODE_DONE:
+            # Already terminal from a prior run: nothing left to probe or wait
+            # for. Existing result/recommended state stays untouched.
+            return 0
         completed = 0
         resume_floor = now if resumed else None
         while max_measurements is None or completed < max_measurements:
@@ -237,6 +241,11 @@ class Calibrator:
                 resume_floor = None
             state["updated_at"] = iso(finished)
             save_state(self.state_path, state)
+            if controller.get("mode") == MODE_DONE:
+                # This measurement just reached the terminal state: it has
+                # already been emitted and persisted atomically above. There
+                # is nothing left to wait or probe for.
+                return 0
             # The next quiet interval starts at probe completion, even if the
             # provider's local activity evidence has not appeared yet.
             if max_measurements is not None and completed >= max_measurements:

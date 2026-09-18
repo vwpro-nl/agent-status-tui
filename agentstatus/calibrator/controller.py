@@ -17,6 +17,27 @@ MODE_DONE = "done"
 MAX_SAMPLES = 3
 MIN_BRACKET_SPAN = 60
 
+# Adapter.assess() returns whatever classification string fits a given
+# provider's own probe semantics (see model.Assessment). The controller only
+# understands two evidence labels -- "good" and "bad" -- plus "not usable as
+# evidence" (fail, init, ...). Providers without boundary-crossing detection
+# (Codex, Grok: see their assess(), which only ever returns "ok" or "fail")
+# report every valid, non-failing measurement as "ok" -- a successful
+# interval that never signalled a boundary. That is evidence-equivalent to
+# "good": these adapters simply have no way to emit "bad". This is a
+# classification-string contract, not a per-provider carve-out -- any
+# adapter using this vocabulary gets the same normalization.
+_GOOD_LABELS = frozenset({"good", "ok"})
+_BAD_LABELS = frozenset({"bad"})
+
+
+def _evidence_label(classification: str) -> str | None:
+    if classification in _GOOD_LABELS:
+        return "good"
+    if classification in _BAD_LABELS:
+        return "bad"
+    return None
+
 
 def _explorer_next(progress: int, measured: int) -> int:
     from .core import _next_interval
@@ -255,10 +276,11 @@ def apply(sampling: dict[str, Any], controller: dict[str, Any], *,
             "last_measured_interval_seconds": None,
         }
 
-    if not valid or classification not in ("good", "bad"):
+    label = _evidence_label(classification)
+    if not valid or label is None:
         return controller, freeze
 
-    _add_sample(controller, interval, classification)
+    _add_sample(controller, interval, label)
     decided = decision(_labels(controller, interval))
     last_measured = interval
 
@@ -271,7 +293,7 @@ def apply(sampling: dict[str, Any], controller: dict[str, Any], *,
         }
 
     if controller["mode"] == MODE_EXPLORE:
-        if classification == "good":
+        if label == "good":
             if decided == "good":
                 controller["known_good_seconds"] = (
                     interval if controller["known_good_seconds"] is None
