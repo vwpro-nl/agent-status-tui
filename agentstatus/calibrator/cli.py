@@ -7,7 +7,7 @@ import datetime as dt
 import shlex
 from pathlib import Path
 
-from .adapters import ClaudeCalibratorAdapter, CodexCalibratorAdapter
+from .adapters import ClaudeCalibratorAdapter, CodexCalibratorAdapter, GrokCalibratorAdapter
 from .core import Calibrator
 from .persistence import load_history, load_state
 from .render import chronological, render_header, render_record
@@ -21,9 +21,11 @@ def default_root() -> Path:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="agent-status-tui calibrator")
     parser.add_argument("action", nargs="?", choices=("run", "status", "history"), default="run")
-    parser.add_argument("--agent", choices=("claude", "codex"), default="claude")
-    parser.add_argument("--model", help="provider model (required for Codex run; Claude defaults to sonnet)")
+    parser.add_argument("--agent", choices=("claude", "codex", "grok"), default="claude")
+    parser.add_argument("--model", help="provider model (required for Codex run; Claude defaults to sonnet; Grok uses CLI default when omitted)")
     parser.add_argument("--prompt", default="Reply only: OK")
+    parser.add_argument("--scratch-dir", type=Path,
+                        help="parent directory for temporary probe workspaces (Codex and Grok)")
     claude = parser.add_argument_group("Claude options")
     claude.add_argument("--claude-command", default="claude")
     claude.add_argument("--ccusage-command", default="npx --yes ccusage@latest claude blocks --active --json")
@@ -33,8 +35,9 @@ def main(argv: list[str]) -> int:
     codex = parser.add_argument_group("Codex options")
     codex.add_argument("--codex-command", default="codex")
     codex.add_argument("--codex-home", type=Path, default=Path.home() / ".codex")
-    codex.add_argument("--scratch-dir", type=Path,
-                       help="parent for the temporary read-only Codex probe workspace")
+    grok = parser.add_argument_group("Grok options")
+    grok.add_argument("--grok-command", default="grok")
+    grok.add_argument("--grok-home", type=Path, default=Path.home() / ".grok")
     parser.add_argument("--state-dir", type=Path, default=default_root())
     parser.add_argument("--check-interval", type=float, default=60)
     parser.add_argument("--max-measurements", type=int)
@@ -50,6 +53,11 @@ def main(argv: list[str]) -> int:
         adapter = CodexCalibratorAdapter(
             args.codex_home, model=args.model or "unused", prompt=args.prompt,
             codex_command=shlex.split(args.codex_command), scratch_root=args.scratch_dir,
+        )
+    elif args.agent == "grok":
+        adapter = GrokCalibratorAdapter(
+            args.grok_home, model=args.model, prompt=args.prompt,
+            grok_command=shlex.split(args.grok_command), scratch_root=args.scratch_dir,
         )
     else:
         adapter = ClaudeCalibratorAdapter(

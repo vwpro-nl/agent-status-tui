@@ -23,8 +23,16 @@ from __future__ import annotations
 
 import json
 import shutil
-import urllib.request
 
+from ..grok_billing import (
+    BILLING_MAX_BYTES as _BILLING_MAX_BYTES,
+    BILLING_TIMEOUT as _BILLING_TIMEOUT,
+    BILLING_URL as _BILLING_URL,
+    WEEKLY_PERIOD as _WEEKLY_PERIOD,
+    billing_request as _billing_request,
+    safe_close as _safe_close,
+    select_bearer as _select_bearer,
+)
 from ..model import WEEK_MINUTES, AgentStatus, Detection, Window
 from ..env import Env
 from ._common import combine, load_json, newest_mtime, parse_iso
@@ -33,11 +41,6 @@ KEY = "grok"
 DISPLAY_NAME = "GROK"
 
 _SESSION_GLOBS = ("*.jsonl", "*.json")
-
-_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
-_BILLING_TIMEOUT = 4.0
-_BILLING_MAX_BYTES = 1_000_000
-_WEEKLY_PERIOD = "USAGE_PERIOD_TYPE_WEEKLY"
 
 
 # --- activity detection (unchanged) ---------------------------------------
@@ -116,49 +119,6 @@ def detect(env: Env) -> Detection:
 # --- live weekly quota ---------------------------------------------------
 
 
-def _select_bearer(env: Env, now: float) -> str | None:
-    """A currently-valid bearer token from ``~/.grok/auth.json``, or ``None``.
-
-    Reads the file read-only.  Considers only entries with a non-empty string
-    ``key``; skips any whose parseable ``expires_at`` is in the past; prefers
-    the entry with the latest ``expires_at``.  Never inspects ``refresh_token``.
-    The returned value is handed straight to the request builder and to
-    nothing else.
-    """
-    data = load_json(env.grok_home / "auth.json")
-    if not isinstance(data, dict):
-        return None
-
-    best_rank = None
-    best_key: str | None = None
-    for entry in data.values():
-        if not isinstance(entry, dict):
-            continue
-        key = entry.get("key")
-        if not isinstance(key, str) or not key.strip():
-            continue
-        expires_at = parse_iso(entry.get("expires_at"))
-        if expires_at is not None and expires_at <= now:
-            continue  # expired -> must not be sent
-        rank = expires_at if expires_at is not None else float("-inf")
-        if best_rank is None or rank > best_rank:
-            best_rank, best_key = rank, key
-    return best_key
-
-
-def _billing_request(token: str):
-    """Perform the bounded billing GET and return parsed JSON.  Raises on any
-    HTTP/network/decode error -- the caller isolates that."""
-    request = urllib.request.Request(
-        _BILLING_URL,
-        headers={"Authorization": "Bearer " + token, "Accept": "application/json"},
-        method="GET",
-    )
-    with urllib.request.urlopen(request, timeout=_BILLING_TIMEOUT) as response:
-        raw = response.read(_BILLING_MAX_BYTES)
-    return json.loads(raw.decode("utf-8", "replace"))
-
-
 def _map_weekly(payload) -> tuple[Window | None, str | None]:
     """Map a billing payload to a weekly :class:`Window`, or explain why not.
 
@@ -191,17 +151,6 @@ def _map_weekly(payload) -> tuple[Window | None, str | None]:
 
     return Window(used_percent=used_percent, resets_at=resets_at,
                   nominal_minutes=nominal_minutes), None
-
-
-def _safe_close(obj) -> None:
-    """Close a file-like exception payload (e.g. urllib's ``HTTPError``) so a
-    failed request leaves no dangling handle."""
-    closer = getattr(obj, "close", None)
-    if callable(closer):
-        try:
-            closer()
-        except Exception:
-            pass
 
 
 def _weekly_quota(env: Env, now: float) -> tuple[Window | None, str | None]:

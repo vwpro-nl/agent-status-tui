@@ -3,6 +3,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import io
+from contextlib import redirect_stdout
+from unittest.mock import Mock, patch
+
+from agentstatus.calibrator import cli
 from agentstatus.calibrator.core import Calibrator, VIRGIN_INTERVALS
 from agentstatus.calibrator.model import ActivityResult, Assessment, Observation
 from agentstatus.calibrator.persistence import load_histories, load_history, load_state
@@ -364,6 +369,25 @@ class CalibratorTests(unittest.TestCase):
         self.runner(check_interval=30).run(max_measurements=1, emit=shown.append)
         finished = dt.datetime.fromisoformat(shown[0]["timestamp"].replace("Z", "+00:00"))
         self.assertGreaterEqual((finished - start).total_seconds(), 60)
+
+
+class ScratchDirCliTests(unittest.TestCase):
+    def test_codex_and_grok_share_the_same_scratch_dir_option(self):
+        fake = Mock(display_name="X")
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(cli, "CodexCalibratorAdapter", return_value=fake) as codex, \
+             patch.object(cli, "GrokCalibratorAdapter", return_value=fake) as grok, \
+             redirect_stdout(io.StringIO()):
+            scratch = Path(directory) / "scratch"
+            common = ["status", "--scratch-dir", str(scratch), "--state-dir", directory]
+            self.assertEqual(cli.main([*common, "--agent", "codex", "--model", "fixture"]), 0)
+            self.assertEqual(cli.main([*common, "--agent", "grok"]), 0)
+        self.assertEqual(codex.call_args.kwargs["scratch_root"], scratch)
+        self.assertEqual(grok.call_args.kwargs["scratch_root"], scratch)
+        source = __import__("inspect").getsource(cli.main)
+        self.assertIn("--scratch-dir", source)
+        self.assertIn("Codex and Grok", source)
+        self.assertLess(source.index("--scratch-dir"), source.index("Codex options"))
 
 
 if __name__ == "__main__":

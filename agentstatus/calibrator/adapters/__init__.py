@@ -2,5 +2,6 @@
 
 from .claude import ClaudeCalibratorAdapter
 from .codex import CodexCalibratorAdapter
+from .grok import GrokCalibratorAdapter
 
-__all__ = ["ClaudeCalibratorAdapter", "CodexCalibratorAdapter"]
+__all__ = ["ClaudeCalibratorAdapter", "CodexCalibratorAdapter", "GrokCalibratorAdapter"]
