@@ -79,7 +79,7 @@ def main(argv: list[str]) -> int:
             next_at = dt.datetime.fromisoformat(next_text.replace("Z", "+00:00")) if next_text else None
             print(render_record(record, adapter.display_name, next_at))
         return 0
-    print(render_header())
+    print(render_header(), flush=True)
     calibrator = Calibrator(adapter, state_path, history_path, check_interval=args.check_interval)
     def emit(record):
         value = record.get("next_scheduled_at")
