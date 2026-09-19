@@ -45,6 +45,14 @@ def main(argv: list[str] | None = None) -> int:
         # The active subsystem is imported only through this explicit route.
         from .calibrator.cli import main as calibrator_main
         return calibrator_main(effective_argv[1:])
+    if effective_argv and effective_argv[0] == "keepalive":
+        # Likewise: imported only through this explicit route.
+        from .keepalive.cli import main as keepalive_main
+        return keepalive_main(effective_argv[1:])
+    if effective_argv and effective_argv[0] == "doctor":
+        # Likewise: imported only through this explicit route.
+        from .doctor import main as doctor_main
+        return doctor_main(effective_argv[1:])
 
     parser = argparse.ArgumentParser(
         prog="agent-status-tui",

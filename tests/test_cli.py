@@ -67,6 +67,73 @@ class CliTests(unittest.TestCase):
         import inspect
         self.assertIn('effective_argv[0] == "calibrator"', inspect.getsource(cli.main))
 
+    def test_normal_status_route_never_imports_or_runs_keepalive(self):
+        import subprocess
+        real_popen = subprocess.Popen
+        def forbidden_probe(*args, **kwargs):
+            raise AssertionError("normal status route started a subprocess/probe")
+        real_collect = cli.collect
+        cli.collect = lambda env, now, previous=None: []
+        subprocess.Popen = forbidden_probe
+        try:
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(["--once"]), 0)
+        finally:
+            cli.collect = real_collect
+            subprocess.Popen = real_popen
+        import inspect
+        self.assertIn('effective_argv[0] == "keepalive"', inspect.getsource(cli.main))
+
+    def test_normal_status_route_never_imports_keepalive_module(self):
+        import subprocess
+        import sys
+        script = (
+            "import sys\n"
+            "sys.path.insert(0, %r)\n"
+            "from agentstatus import cli\n"
+            "cli.collect = lambda env, now, previous=None: []\n"
+            "cli.main(['--once'])\n"
+            "assert not any(name == 'agentstatus.keepalive' or name.startswith('agentstatus.keepalive.') "
+            "for name in sys.modules), sorted(sys.modules)\n"
+            "print('OK')\n"
+        ) % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("OK", result.stdout)
+
+    def test_normal_status_route_never_imports_or_runs_doctor(self):
+        import subprocess
+        real_popen = subprocess.Popen
+        def forbidden_probe(*args, **kwargs):
+            raise AssertionError("normal status route started a subprocess/probe")
+        real_collect = cli.collect
+        cli.collect = lambda env, now, previous=None: []
+        subprocess.Popen = forbidden_probe
+        try:
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.main(["--once"]), 0)
+        finally:
+            cli.collect = real_collect
+            subprocess.Popen = real_popen
+        import inspect
+        self.assertIn('effective_argv[0] == "doctor"', inspect.getsource(cli.main))
+
+    def test_normal_status_route_never_imports_doctor_module(self):
+        import subprocess
+        import sys
+        script = (
+            "import sys\n"
+            "sys.path.insert(0, %r)\n"
+            "from agentstatus import cli\n"
+            "cli.collect = lambda env, now, previous=None: []\n"
+            "cli.main(['--once'])\n"
+            "assert 'agentstatus.doctor' not in sys.modules, sorted(sys.modules)\n"
+            "print('OK')\n"
+        ) % os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("OK", result.stdout)
+
     def test_normal_status_route_never_imports_calibrator_module(self):
         # A real, isolated-interpreter check: any calibrator submodule
         # already sitting in sys.modules from another test file would make

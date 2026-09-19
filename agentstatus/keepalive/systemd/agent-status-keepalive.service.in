@@ -1,0 +1,28 @@
+[Unit]
+Description=Agent Status Keepalive (Claude/Codex/Grok idle-silence pinger)
+After=default.target
+
+[Service]
+Type=simple
+# Placeholders below are filled in by install.sh from this checkout and
+# from whatever "command -v claude/codex/grok" resolves to in the shell
+# that runs install.sh -- never guessed or hardcoded here.
+ExecStart="@AGENT_STATUS_TUI@" keepalive --service --claude-command "@CLAUDE_BIN@" --codex-command "@CODEX_BIN@" --grok-command "@GROK_BIN@"
+Restart=on-failure
+RestartSec=30
+
+# A broad fallback PATH for anything the provider CLIs themselves shell out
+# to (git, node, npx, ...) -- systemd --user does not source shell rc files,
+# so it never sees your interactive login PATH on its own.
+Environment=PATH=@PATH_FALLBACK@
+
+# Optional, machine-specific overrides (e.g. extra PATH entries for a node
+# version manager). Never required, never committed, never a place for
+# secrets -- the leading "-" means systemd does not error if this is absent.
+EnvironmentFile=-%h/.config/agent-status-tui/keepalive.env
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
