@@ -4,14 +4,7 @@ One compact, read-only terminal dashboard for the coding agents installed on
 this machine. It replaces the separate per-agent status panes with a single
 table: automatic detection, one row per agent, ordered by recent activity.
 
-```
-                     AGENT STATUS
-agent      5h               reset   week             reset   data
-CODEX      ███░░░░░│░  34%   29m     █████░░│░░  46%   1d10h   LIVE
-CLAUDE     ██████░░│░  63%   18m     ██████│░░░  62%   2d4h    11m
-GROK       --               --      --               --       22s
-           Sun 6 Sep 2026 05:40 · (1m) refresh in 28s
-```
+![agent-status-tui dashboard](docs/agent-status-tui.png)
 
 Standard library only. The only network call is the Grok adapter's single
 bounded request for its weekly quota. `~/.codex/auth.json` and
@@ -68,8 +61,9 @@ disturbed.
 | **Claude** | Omarchy `agent-usage/claude-limits.json`, else `~/.claude.json` `cachedUsageUtilization` | no | newest `~/.claude/projects/**` transcript mtime + `~/.claude/history.jsonl` |
 | **Grok** | live weekly quota from a single bounded `GET …/v1/billing?format=credits` authorised with the current `~/.grok/auth.json` bearer token; no 5h source | weekly only | `~/.grok/sessions/**/summary.json` `last_active_at`, else session-file mtimes, else `active_sessions.json` |
 
-Grok exposes only a weekly window (`creditUsagePercent` + the current billing
-period end), and only when the billing period is explicitly weekly. There is
+Grok exposes only a weekly window, sourced from `creditUsagePercent` when
+available and the current billing period end independently, and only when the
+billing period is explicitly weekly. There is
 still no local 5h source, so Grok's 5h column stays `--`. If the billing
 request cannot be made (no/expired credential, HTTP, network, or schema
 failure) Grok degrades to an activity-age row and its activity detection is
@@ -106,7 +100,8 @@ it is documented only as a historical constant now — see STATUS.md.)
 
 **Activity-aware: a slot is not automatically a ping.** At its own slot,
 each agent independently checks its own real activity (never another
-agent's): if it was active in roughly the last 30 minutes, that slot
+agent's): if it was active in the last 30 minutes (1800 seconds, inclusive),
+that slot
 **skips** the ping entirely — no model turn, no cost. Otherwise it pings.
 This is the whole point: minimise token spend while still guaranteeing a
 ping within about 30 minutes of genuine idleness, per agent, independently.
