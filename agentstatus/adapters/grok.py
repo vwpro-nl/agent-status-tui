@@ -122,10 +122,21 @@ def detect(env: Env) -> Detection:
 def _map_weekly(payload) -> tuple[Window | None, str | None]:
     """Map a billing payload to a weekly :class:`Window`, or explain why not.
 
-    A window is produced only when the period is explicitly weekly and the
-    percentage is a real number.  A missing/null/malformed percentage yields
-    no window (never a fabricated 0%); a missing/invalid period end yields a
-    window with ``resets_at=None`` (never a fabricated reset).
+    A window is produced only when the period is explicitly weekly -- but
+    percentage and reset are independent facts within it, exactly like
+    :class:`Window` itself already models (``None`` fields mean "not
+    known", never zero). A confirmed live case: the official Grok CLI and
+    this project read the same endpoint, and a weekly response can carry a
+    valid, correctly-typed ``currentPeriod`` (with a real ``end``) while
+    ``creditUsagePercent`` itself is missing/null. The official Grok TUI
+    renders that as ``0%`` -- a client-side fallback, not a proven server
+    value -- which this project deliberately does not copy: a missing/null/
+    malformed percentage yields ``used_percent=None`` (rendered ``--``,
+    never a fabricated ``0%``), while a genuinely reported reset is still
+    used and shown. A missing/invalid period end likewise yields
+    ``resets_at=None`` (never a fabricated reset). Only when *neither* a
+    usable percentage nor a usable reset survive does this report no window
+    at all -- an entirely empty window would tell the caller nothing.
     """
     if not isinstance(payload, dict):
         return None, "billing response malformed"
@@ -138,16 +149,20 @@ def _map_weekly(payload) -> tuple[Window | None, str | None]:
         return None, "billing period not weekly"
 
     percent = config.get("creditUsagePercent")
-    if isinstance(percent, bool) or not isinstance(percent, (int, float)):
-        return None, "billing percent unusable"
+    if percent is None or isinstance(percent, bool) or not isinstance(percent, (int, float)):
+        used_percent = None
+    else:
+        used_percent = max(0.0, min(100.0, float(percent)))
 
-    used_percent = max(0.0, min(100.0, float(percent)))
     resets_at = parse_iso(period.get("end"))
     starts_at = parse_iso(period.get("start"))
     if resets_at is not None and starts_at is not None and resets_at > starts_at:
         nominal_minutes = int(round((resets_at - starts_at) / 60))
     else:
         nominal_minutes = WEEK_MINUTES
+
+    if used_percent is None and resets_at is None:
+        return None, "billing percent and reset both unusable"
 
     return Window(used_percent=used_percent, resets_at=resets_at,
                   nominal_minutes=nominal_minutes), None

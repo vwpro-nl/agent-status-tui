@@ -213,6 +213,12 @@ class GrokWeeklyQuotaTests(unittest.TestCase):
         self.assertEqual(status.freshness_kind, "activity")
 
     def test_missing_percent_does_not_become_zero(self):
+        # Confirmed live shape: currentPeriod is correctly weekly with a
+        # real end, but creditUsagePercent is absent entirely from the
+        # response. The official Grok TUI renders that as 0% -- a
+        # client-side fallback, not a proven server value -- which this
+        # project must not copy: the percentage stays unknown (None, never
+        # 0.0) while the genuinely reported reset is still kept and shown.
         fx.grok_auth(self.env, key="k", expires_at=NOW + 3600)
         self._mock(result={"config": {
             "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY",
@@ -220,19 +226,56 @@ class GrokWeeklyQuotaTests(unittest.TestCase):
                               "end": "2026-09-12T16:26:02+00:00"},
         }})
         status = grok.poll(self.env, NOW)
-        self.assertIsNone(status.weekly)      # NOT Window(used_percent=0.0)
+        self.assertIsNotNone(status.weekly)
+        self.assertIsNone(status.weekly.used_percent)      # NOT Window(used_percent=0.0)
+        self.assertIsNotNone(status.weekly.resets_at)      # reset is still usable and kept
+        self.assertEqual(status.availability, "ok")
 
     def test_null_percent_does_not_become_zero(self):
+        # Same live shape, but creditUsagePercent is explicitly null rather
+        # than absent -- must be treated identically to "missing".
         fx.grok_auth(self.env, key="k", expires_at=NOW + 3600)
         self._mock(result={"config": {
             "creditUsagePercent": None,
             "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY",
+                              "start": "2026-09-05T16:26:02+00:00",
                               "end": "2026-09-12T16:26:02+00:00"},
+        }})
+        status = grok.poll(self.env, NOW)
+        self.assertIsNotNone(status.weekly)
+        self.assertIsNone(status.weekly.used_percent)
+        self.assertIsNotNone(status.weekly.resets_at)
+        self.assertEqual(status.availability, "ok")
+
+    def test_missing_percent_with_no_usable_reset_either_yields_no_window(self):
+        # When *neither* percent nor reset survive, there is nothing left
+        # to report -- an entirely empty Window would be misleading, so
+        # this still falls back the same way a fully malformed response
+        # does (activity age, not a live window).
+        fx.grok_auth(self.env, key="k", expires_at=NOW + 3600)
+        self._mock(result={"config": {
+            "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY"},
         }})
         status = grok.poll(self.env, NOW)
         self.assertIsNone(status.weekly)
 
-    def test_malformed_percent_is_rejected(self):
+    def test_invalid_weekly_period_still_yields_no_window_even_with_percent(self):
+        # An invalid/missing period type must still reject the window
+        # entirely -- percent/reset independence only applies once the
+        # period itself is confirmed weekly.
+        fx.grok_auth(self.env, key="k", expires_at=NOW + 3600)
+        self._mock(result={"config": {
+            "creditUsagePercent": 12.0,
+            "currentPeriod": {"end": "2026-09-12T16:26:02+00:00"},  # no "type" at all
+        }})
+        status = grok.poll(self.env, NOW)
+        self.assertIsNone(status.weekly)
+
+    def test_malformed_percent_is_treated_like_missing_never_fabricated(self):
+        # A malformed percent value is never coerced into a number and
+        # never crashes -- treated exactly like "missing": used_percent
+        # stays None, while a genuinely valid reset in the same response is
+        # still kept and shown (see test_missing_percent_does_not_become_zero).
         fx.grok_auth(self.env, key="k", expires_at=NOW + 3600)
         for bad in ("3%", True, [3], {"v": 3}):
             with self.subTest(bad=bad):
@@ -242,7 +285,9 @@ class GrokWeeklyQuotaTests(unittest.TestCase):
                                       "end": "2026-09-12T16:26:02+00:00"},
                 }})
                 status = grok.poll(self.env, NOW)
-                self.assertIsNone(status.weekly)
+                self.assertIsNotNone(status.weekly)
+                self.assertIsNone(status.weekly.used_percent)
+                self.assertIsNotNone(status.weekly.resets_at)
 
     def test_missing_period_end_gives_a_window_with_no_fabricated_reset(self):
         fx.grok_auth(self.env, key="k", expires_at=NOW + 3600)

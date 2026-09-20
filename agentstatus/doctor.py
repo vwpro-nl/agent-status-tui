@@ -13,14 +13,15 @@ reports it. A provider being unavailable (quota exhausted, CLI missing,
 etc.) is not, by itself, a Doctor finding -- Doctor checks installation and
 structural coherence, not whether a provider currently has quota.
 
-Depends on :mod:`agentstatus.keepalive` for its facts (interval, provider
-list, state schema) -- one-way: keepalive itself never imports this module,
-so keepalive's own standalone/zero-calibrator-dependency property is
+Depends on :mod:`agentstatus.keepalive` for its facts (cycle configuration,
+provider list, state schema) -- one-way: keepalive itself never imports this
+module, so keepalive's own standalone/zero-calibrator-dependency property is
 unaffected. Never imports anything from ``agentstatus.calibrator``.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import re
 import shlex
@@ -29,17 +30,21 @@ from pathlib import Path
 from typing import Any
 
 from .keepalive.cli import AGENTS as KEEPALIVE_AGENTS, default_root as keepalive_state_root
-from .keepalive.core import INTERVAL_SECONDS
-# The scheduler's own timestamp parsing rule (KeepaliveAgent._floor() calls
-# this exact function on last_ping_finished_at): reused here, not
-# reimplemented, so Doctor's validation can never silently drift from what
-# would actually make the scheduler raise.
+from .keepalive.core import AGENT_STAGGER_SECONDS, CYCLE_SECONDS
+# The scheduler's own timestamp format (KeepaliveAgent._do_ping() writes
+# last_ping_finished_at via core.iso(), the exact inverse of this parser):
+# reused here, not reimplemented, so Doctor's validation of that field can
+# never silently drift from what the scheduler itself actually writes.
 from .keepalive.core import _parse_iso as _keepalive_parse_iso
+from .keepalive.history import RETENTION_DAYS as HISTORY_RETENTION_DAYS
+from .keepalive.history import history_path as keepalive_history_path
+from .keepalive.history import load_events_with_stats as load_keepalive_history
 from .keepalive.persistence import PersistenceError, load_state
 from .keepalive.providers import ClaudeKeepalive, CodexKeepalive, GrokKeepalive
 
 UNIT_NAME = "agent-status-keepalive.service"
-EXPECTED_INTERVAL_SECONDS = 3001
+EXPECTED_CYCLE_SECONDS = 1800  # every wall-clock :00 and :30
+EXPECTED_AGENT_STAGGER_SECONDS = 5
 
 # (name, status, detail); status is True / False / "warn" / "unknown".
 CheckResult = tuple[str, Any, str]
@@ -174,11 +179,19 @@ def check_executable_coherence(unit_path: Path | None = None) -> CheckResult:
     return ("executable coherence", True, str(exec_path))
 
 
-def check_interval_configuration() -> CheckResult:
-    if INTERVAL_SECONDS != EXPECTED_INTERVAL_SECONDS:
-        return ("interval", False,
-                f"configured as {INTERVAL_SECONDS}s, expected exactly {EXPECTED_INTERVAL_SECONDS}s")
-    return ("interval", True, f"{INTERVAL_SECONDS}s")
+def check_cycle_configuration() -> CheckResult:
+    """The fixed wall-clock cycle (:00/:30) and per-agent stagger -- the
+    production cadence since the 3001s floating-interval model was retired
+    (see docs/calibrator-research.md and STATUS.md for that history).
+    """
+    if CYCLE_SECONDS != EXPECTED_CYCLE_SECONDS:
+        return ("cycle", False,
+                f"configured as {CYCLE_SECONDS}s, expected exactly {EXPECTED_CYCLE_SECONDS}s (:00/:30)")
+    if AGENT_STAGGER_SECONDS != EXPECTED_AGENT_STAGGER_SECONDS:
+        return ("cycle", False,
+                f"agent stagger configured as {AGENT_STAGGER_SECONDS}s, "
+                f"expected exactly {EXPECTED_AGENT_STAGGER_SECONDS}s")
+    return ("cycle", True, f"every :00/:30, {AGENT_STAGGER_SECONDS}s stagger per agent")
 
 
 def check_providers_present() -> CheckResult:
@@ -210,13 +223,14 @@ def check_provider_state(agent_key: str, state_dir: Path | None = None) -> Check
         return (agent_key, "warn", "no state yet (never pinged)")
     if state.get("agent") != agent_key:
         return (agent_key, False, f"state identity mismatch: agent={state.get('agent')!r}")
-    # last_ping_finished_at is the one field the scheduler actually parses
-    # (KeepaliveAgent._floor()) -- a malformed value here doesn't fail
-    # loudly on its own; it raises the next time this agent's _wait() runs,
-    # which _supervised_run then retries forever at a fixed backoff without
-    # ever reaching ping() again (the bad value is never rewritten). Schema
-    # + identity alone would call that "structurally valid" -- validate the
-    # one field that would actually break the scheduler.
+    # last_ping_finished_at is write-only from the scheduler's own
+    # perspective (the fixed :00/:30 wall-clock cycle never reads it back
+    # to compute anything -- see agentstatus.keepalive.core), but it is
+    # still a documented part of this state file's schema and the one
+    # doctor/diagnostic surface for "when did this agent last actually
+    # ping". Schema + identity alone would call a malformed value here
+    # "structurally valid"; this validates the one field a human or another
+    # tool is actually likely to read and trust.
     last_ping_finished_at = state.get("last_ping_finished_at")
     if last_ping_finished_at is not None:
         if not isinstance(last_ping_finished_at, str):
@@ -231,11 +245,62 @@ def check_provider_state(agent_key: str, state_dir: Path | None = None) -> Check
         # offset (e.g. "2026-09-19T03:14:03") into a naive datetime instead
         # of raising -- the scheduler works exclusively in timezone-aware
         # UTC (see keepalive.core.iso()/utc_now()), so a naive value here
-        # would raise on the first aware/naive comparison _wait() makes.
+        # would still be a schema violation even though nothing currently
+        # re-parses it into a scheduling decision.
         if parsed.tzinfo is None:
             return (agent_key, False,
                     f"last_ping_finished_at is not timezone-aware: {last_ping_finished_at!r}")
     detail = f"last_status={state.get('last_status') or '-'} last_ping_finished_at={state.get('last_ping_finished_at') or '-'}"
+    return (agent_key, True, detail)
+
+
+def check_history_dir_writable(state_dir: Path | None = None) -> CheckResult:
+    """Structural only: can the history directory exist and be written to.
+    Never creates it -- an absent directory is simply "not yet written",
+    exactly like an agent that has never pinged.
+    """
+    root = (state_dir or keepalive_state_root()) / "history"
+    if not root.exists():
+        return ("history directory", "warn", f"not created yet: {root} (created on first recorded event)")
+    if not root.is_dir():
+        return ("history directory", False, f"exists but is not a directory: {root}")
+    if not os.access(root, os.W_OK | os.X_OK):
+        return ("history directory", False, f"not writable: {root}")
+    return ("history directory", True, str(root))
+
+
+def check_history_file(agent_key: str, state_dir: Path | None = None,
+                       now: dt.datetime | None = None) -> CheckResult:
+    """One agent's history file: parseable events, and retention bounds.
+
+    A missing file is "warn" (never pinged, or never observed yet), exactly
+    like Doctor's existing keepalive-state convention. Any unparseable
+    lines are reported but never treated as a hard failure -- corrupt
+    history self-heals on the next successful ping (see
+    ``keepalive.history.record_event``) and must never look like an
+    installation problem that needs manual repair.
+    """
+    path = keepalive_history_path(state_dir or keepalive_state_root(), agent_key)
+    if not path.is_file():
+        return (agent_key, "warn", "no history yet (never pinged, or history not yet recorded)")
+    events, skipped = load_keepalive_history(path)
+    if not events and skipped:
+        return (agent_key, "warn", f"{skipped} line(s) could not be parsed; no valid events remain")
+    if not events:
+        return (agent_key, "warn", "history file present but empty")
+    clock = now or dt.datetime.now(dt.timezone.utc)
+    oldest = min(events, key=lambda e: e.get("timestamp") or "")
+    oldest_at = _keepalive_parse_iso(oldest["timestamp"]) if isinstance(oldest.get("timestamp"), str) else None
+    stale = False
+    if oldest_at is not None and oldest_at.tzinfo is not None:
+        age_days = (clock - oldest_at).total_seconds() / 86400
+        stale = age_days > HISTORY_RETENTION_DAYS + 1  # +1 day slack for cadence/jitter
+    detail = f"{len(events)} event(s)"
+    if skipped:
+        detail += f", {skipped} unparseable line(s) skipped (self-heals on next ping)"
+    if stale:
+        detail += f", oldest event exceeds {HISTORY_RETENTION_DAYS}d retention -- check housekeeping"
+        return (agent_key, "warn", detail)
     return (agent_key, True, detail)
 
 
@@ -273,11 +338,15 @@ def main(argv: list[str]) -> int:
         check_executable_coherence(),
     ])
     failed |= print_results("Keepalive configuration", [
-        check_interval_configuration(),
+        check_cycle_configuration(),
         check_providers_present(),
     ])
     failed |= print_results("Keepalive state", [
         check_provider_state(agent) for agent in KEEPALIVE_AGENTS
+    ])
+    failed |= print_results("Keepalive history", [
+        check_history_dir_writable(),
+        *[check_history_file(agent) for agent in KEEPALIVE_AGENTS],
     ])
 
     if failed:

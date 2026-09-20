@@ -2,6 +2,7 @@
 systemctl call, no real provider CLI, and the live keepalive service/state
 on this machine is never touched."""
 
+import datetime as dt
 import io
 import tempfile
 import unittest
@@ -10,7 +11,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agentstatus import doctor
+from agentstatus.keepalive import history as keepalive_history
 from agentstatus.keepalive.persistence import STATE_SCHEMA, save_state
+
+UTC = dt.timezone.utc
 
 
 class KeepalivePackageAvailableTests(unittest.TestCase):
@@ -224,19 +228,27 @@ class ExecutableCoherenceTests(unittest.TestCase):
 
 
 class ConfigurationChecksTests(unittest.TestCase):
-    def test_interval_sourced_from_the_real_implementation(self):
-        # Doctor must read the live constant, not hardcode its own copy.
-        from agentstatus.keepalive.core import INTERVAL_SECONDS
-        _name, status, detail = doctor.check_interval_configuration()
+    def test_cycle_sourced_from_the_real_implementation(self):
+        # Doctor must read the live constants, not hardcode its own copy.
+        from agentstatus.keepalive.core import AGENT_STAGGER_SECONDS, CYCLE_SECONDS
+        _name, status, detail = doctor.check_cycle_configuration()
         self.assertIs(status, True)
-        self.assertIn(str(INTERVAL_SECONDS), detail)
+        self.assertIn(str(AGENT_STAGGER_SECONDS), detail)
+        self.assertEqual(CYCLE_SECONDS, 1800)
 
-    def test_interval_mismatch_would_be_reported_as_a_failure(self):
-        with patch.object(doctor, "INTERVAL_SECONDS", 3000):
-            _name, status, detail = doctor.check_interval_configuration()
+    def test_cycle_mismatch_would_be_reported_as_a_failure(self):
+        with patch.object(doctor, "CYCLE_SECONDS", 3000):
+            _name, status, detail = doctor.check_cycle_configuration()
         self.assertIs(status, False)
         self.assertIn("3000", detail)
-        self.assertIn("3001", detail)
+        self.assertIn("1800", detail)
+
+    def test_stagger_mismatch_would_be_reported_as_a_failure(self):
+        with patch.object(doctor, "AGENT_STAGGER_SECONDS", 7):
+            _name, status, detail = doctor.check_cycle_configuration()
+        self.assertIs(status, False)
+        self.assertIn("7", detail)
+        self.assertIn("5", detail)
 
     def test_providers_present_matches_the_real_implementation(self):
         from agentstatus.keepalive.cli import AGENTS
@@ -314,9 +326,9 @@ class ProviderStateChecksTests(unittest.TestCase):
 
     def test_malformed_last_ping_finished_at_is_a_failure(self):
         # Regression: schema + identity alone called this "structurally
-        # valid" even though KeepaliveAgent._floor() parses this exact
-        # field and would raise -- which _supervised_run then retries
-        # forever at a fixed backoff without this agent ever pinging again.
+        # valid" even though it violates the field's own documented
+        # schema (a valid, timezone-aware ISO timestamp or null) -- the one
+        # doctor/diagnostic surface for "when did this agent last ping".
         save_state(self.root / "codex.json", {
             "schema": STATE_SCHEMA, "agent": "codex",
             "last_ping_finished_at": "not-a-timestamp",
@@ -390,6 +402,120 @@ class ProviderStateChecksTests(unittest.TestCase):
         })
         _name, status, _detail = doctor.check_provider_state("grok", self.root)
         self.assertIs(status, True)
+
+
+class HistoryDirectoryChecksTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_missing_history_dir_is_warn_not_fail(self):
+        _name, status, detail = doctor.check_history_dir_writable(self.root)
+        self.assertEqual(status, "warn")
+        self.assertIn("not created yet", detail)
+
+    def test_present_writable_history_dir_is_ok(self):
+        (self.root / "history").mkdir()
+        _name, status, _detail = doctor.check_history_dir_writable(self.root)
+        self.assertIs(status, True)
+
+    def test_history_path_that_is_a_file_not_a_directory_is_a_failure(self):
+        (self.root / "history").write_text("not a directory")
+        _name, status, detail = doctor.check_history_dir_writable(self.root)
+        self.assertIs(status, False)
+        self.assertIn("not a directory", detail)
+
+    def test_unwritable_history_dir_is_a_failure(self):
+        history_dir = self.root / "history"
+        history_dir.mkdir()
+        history_dir.chmod(0o500)
+        try:
+            _name, status, detail = doctor.check_history_dir_writable(self.root)
+        finally:
+            history_dir.chmod(0o700)  # restore so tearDown can clean it up
+        self.assertIs(status, False)
+        self.assertIn("not writable", detail)
+
+
+class HistoryFileChecksTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_no_history_file_yet_is_warn(self):
+        _name, status, detail = doctor.check_history_file("codex", self.root)
+        self.assertEqual(status, "warn")
+        self.assertIn("no history yet", detail)
+
+    def test_valid_recent_history_is_ok(self):
+        now = dt.datetime(2026, 9, 20, tzinfo=UTC)
+        path = keepalive_history.history_path(self.root, "codex")
+        keepalive_history.record_event(path, {
+            "timestamp": now.isoformat().replace("+00:00", "Z"), "agent": "codex",
+            "ping_status": "ok", "ping_error": None, "five_hour": None, "weekly": None,
+            "observation_status": "unavailable", "observation_detail": "fixture",
+        }, now=now)
+        _name, status, detail = doctor.check_history_file("codex", self.root, now=now)
+        self.assertIs(status, True)
+        self.assertIn("1 event", detail)
+
+    def test_corrupt_lines_are_reported_as_warn_not_fail_and_self_heal_is_mentioned(self):
+        path = keepalive_history.history_path(self.root, "codex")
+        path.parent.mkdir(parents=True)
+        path.write_text("not valid json at all\n")
+        _name, status, detail = doctor.check_history_file("codex", self.root)
+        self.assertEqual(status, "warn")
+        self.assertIn("could not be parsed", detail)
+
+    def test_mixed_valid_and_corrupt_lines_is_ok_but_mentions_skipped_count(self):
+        import json
+        now = dt.datetime(2026, 9, 20, tzinfo=UTC)
+        path = keepalive_history.history_path(self.root, "codex")
+        path.parent.mkdir(parents=True)
+        good = {
+            "schema": keepalive_history.HISTORY_SCHEMA,
+            "timestamp": now.isoformat().replace("+00:00", "Z"), "agent": "codex",
+            "ping_status": "ok", "ping_error": None, "five_hour": None, "weekly": None,
+            "observation_status": "unavailable", "observation_detail": None,
+        }
+        path.write_text("garbage\n" + json.dumps(good) + "\n")
+        _name, status, detail = doctor.check_history_file("codex", self.root, now=now)
+        self.assertIs(status, True)
+        self.assertIn("unparseable line(s) skipped", detail)
+
+    def test_history_older_than_retention_plus_slack_is_warn(self):
+        now = dt.datetime(2026, 9, 20, tzinfo=UTC)
+        very_old = now - dt.timedelta(days=keepalive_history.RETENTION_DAYS + 5)
+        path = keepalive_history.history_path(self.root, "codex")
+        # Write directly (bypassing record_event's own retention pruning) to
+        # simulate housekeeping having stopped running for this agent.
+        import json
+        path.parent.mkdir(parents=True)
+        event = {
+            "schema": keepalive_history.HISTORY_SCHEMA,
+            "timestamp": very_old.isoformat().replace("+00:00", "Z"), "agent": "codex",
+            "ping_status": "ok", "ping_error": None, "five_hour": None, "weekly": None,
+            "observation_status": "unavailable", "observation_detail": None,
+        }
+        path.write_text(json.dumps(event) + "\n")
+        _name, status, detail = doctor.check_history_file("codex", self.root, now=now)
+        self.assertEqual(status, "warn")
+        self.assertIn("retention", detail)
+
+    def test_doctor_never_deletes_or_rewrites_a_history_file(self):
+        path = keepalive_history.history_path(self.root, "codex")
+        path.parent.mkdir(parents=True)
+        path.write_text("garbage\n")
+        before = path.read_bytes()
+        doctor.check_history_file("codex", self.root)
+        after = path.read_bytes()
+        self.assertEqual(before, after)
 
 
 class DoctorCliTests(unittest.TestCase):

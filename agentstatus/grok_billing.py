@@ -1,8 +1,11 @@
-"""Shared Grok billing/auth helpers for the status adapter and calibrator.
+"""Shared Grok billing/auth helpers for the dashboard's Grok adapter.
 
-This is not a public API. Both call sites must keep the same credential
-rules: read-only auth.json, only a non-empty ``key``, never ``refresh_token``,
-never log or surface the bearer.
+This is not a public API. Keep the same credential rules as the rest of the
+project: read-only auth.json, only a non-empty ``key``, never
+``refresh_token``, never log or surface the bearer. (The self-contained
+``agentstatus.keepalive`` package intentionally does not import this module
+-- see its own package docstring -- and reimplements the same minimal
+subset directly in ``agentstatus/keepalive/observe.py``.)
 """
 
 from __future__ import annotations

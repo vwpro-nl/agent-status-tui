@@ -9,16 +9,26 @@ renders one row per agent in a shared table.
 
 - Python standard library only. No third-party runtime or test dependencies.
 - Read-only with respect to every provider's data. The only outbound network
-  call is the Grok adapter's single bounded `GET` to the Grok billing endpoint
-  for the weekly quota; there is no other network access.
-- `~/.codex/auth.json` and `~/.claude/.credentials.json` are never opened. The
-  Grok adapter reads `~/.grok/auth.json` for the current short-lived bearer
+  calls are single, bounded `GET`s to the Grok billing endpoint for the
+  weekly quota — the dashboard's Grok adapter (per real refresh) and
+  keepalive's own per-slot Grok observation (`agentstatus/keepalive/observe.py`,
+  once per Grok cycle slot, whether that slot pinged or skipped) both make
+  this same call; there is no other network access anywhere in the project.
+- `~/.codex/auth.json` and `~/.claude/.credentials.json` are never opened. Any
+  code that reads `~/.grok/auth.json` (the dashboard's Grok adapter, and
+  keepalive's Grok observation) reads it for the current short-lived bearer
   token only: it never writes it, never reads or uses `refresh_token`, never
   refreshes credentials, and never logs, persists, or surfaces any value from
   it (error text is fixed strings).
-- The Codex adapter may spawn a bounded, short-lived `codex app-server --stdio`
-  subprocess purely to read rate limits. No adapter ever starts a model turn
-  or a provider session.
+- The dashboard's Codex adapter and keepalive's own per-slot Codex
+  observation may each spawn a bounded, short-lived `codex app-server --stdio`
+  subprocess purely to read rate limits. Nothing in this project ever starts
+  a model turn or a provider session solely to measure status — the one
+  exception is keepalive's own deliberate, minimal "Reply only: OK" ping
+  turn, whose entire purpose is keeping the session alive, not measurement,
+  and which keepalive skips entirely for a given agent/slot when that
+  agent already has sufficiently recent real activity (see the keepalive
+  structure notes below).
 
 ## Structure
 
@@ -29,12 +39,58 @@ agentstatus/
   render.py               the one shared renderer + cell-width helpers
   poll.py                 detection + refresh orchestration
   env.py                  env-overridable filesystem locations
-  adapters/               one module per provider (codex, claude, grok)
+  grok_billing.py         shared Grok auth/billing helpers (dashboard adapter only)
+  adapters/               one module per provider (codex, claude, grok) -- the dashboard
+  doctor.py               read-only diagnostics for the keepalive component
+  keepalive/              standalone pinger + chronological event history (see below)
 tests/                    stdlib unittest; fixtures build throwaway temp homes
+docs/                     permanent research/archival notes (not runtime code)
 ```
 
-Adding a provider is one adapter module plus one entry in
+Adding a provider to the dashboard is one adapter module plus one entry in
 `agentstatus/adapters/__init__.py`. The renderer and refresh loop never change.
+
+### `agentstatus/keepalive/`
+
+Self-contained: depends on no other subsystem in this project (not
+`agentstatus.env`, not `agentstatus.adapters`, not `agentstatus.grok_billing`).
+Where it needs the same technique another part of the project already
+proved (e.g. reading Claude's local usage caches, or Grok's billing
+endpoint), it reimplements that technique directly and minimally inside
+this package rather than importing across the boundary.
+
+```
+core.py         clock-aligned scheduler: fixed :00/:30 cycles (CycleRunner),
+                 fixed agent order + 5s stagger, activity-aware PING/SKIP
+                 decision per agent (KeepaliveAgent) -- the one documented,
+                 fixed-window interpretation this project performs; a
+                 ping's own outcome is still read only as PingResult.ok/error
+providers.py     one minimal "Reply only: OK" ping + one activity check per
+                 provider
+persistence.py   per-agent scheduler state (last *ping* outcome only -- a
+                 SKIP never touches it)
+history.py       per-agent chronological event history: atomic append +
+                 16-day retention, tolerant/self-healing reads
+observe.py       provider-native quota/reset snapshot taken once per slot
+                 (PING or SKIP alike) -- passive, bounded, never a model turn
+render.py        chronological table shared by `keepalive history` and
+                 `keepalive monitor`
+cli.py           `keepalive` / `keepalive history` / `keepalive monitor`
+```
+
+Production cadence is fixed wall-clock cycles at every `:00` and `:30`
+(`CYCLE_SECONDS = 1800` in `core.py`), not a floating per-agent interval.
+Every cycle visits agents in one fixed order (`claude`, `codex`, `grok`)
+with a `AGENT_STAGGER_SECONDS = 5` offset between them. At its own slot, an
+agent SKIPs (no ping, no model turn, no state write) when it has real
+activity within `ACTIVITY_WINDOW_SECONDS = 1800` of that slot; otherwise it
+PINGs. `LEGACY_INTERVAL_SECONDS = 3001` is kept only as a documented
+historical constant (see STATUS.md) -- nothing schedules against it.
+
+A slot's action (`PING`/`SKIP`), the ping's technical outcome (`OK`/`FAILED`)
+when it did ping, and what a provider's own native quota/reset surface
+reports afterward are always kept and displayed as separate facts -- a
+successful ping is never presented as, or described as, "delivered".
 
 ## Reference projects
 

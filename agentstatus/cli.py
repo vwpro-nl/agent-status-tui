@@ -41,10 +41,6 @@ def _build_frame(agents, now, interval, next_refresh_at) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     effective_argv = list(sys.argv[1:] if argv is None else argv)
-    if effective_argv and effective_argv[0] == "calibrator":
-        # The active subsystem is imported only through this explicit route.
-        from .calibrator.cli import main as calibrator_main
-        return calibrator_main(effective_argv[1:])
     if effective_argv and effective_argv[0] == "keepalive":
         # Likewise: imported only through this explicit route.
         from .keepalive.cli import main as keepalive_main
