@@ -559,8 +559,11 @@ class KeepaliveProviderTests(unittest.TestCase):
         argv = seen["argv"]
         self.assertEqual(argv[0], "grok")
         self.assertEqual(argv[1:3], ["-m", "grok-fixture"])
-        self.assertIn("--sandbox", argv)
-        self.assertIn("read-only", argv)
+        self.assertNotIn("--sandbox", argv)
+        self.assertIn("--permission-mode", argv)
+        self.assertIn("dontAsk", argv)
+        self.assertIn("--disable-web-search", argv)
+        self.assertIn("--no-subagents", argv)
         self.assertIn("--max-turns", argv)
         self.assertEqual(argv[-1], "Reply only: OK")
         self.assertEqual(seen["kwargs"]["env"]["GROK_HOME"], str(self.home))

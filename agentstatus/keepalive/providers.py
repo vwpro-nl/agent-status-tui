@@ -163,7 +163,7 @@ class GrokKeepalive:
             argv = list(self.command)
             if self.model:
                 argv += ["-m", self.model]
-            argv += ["--cwd", scratch, "--sandbox", "read-only", "--output-format", "json",
+            argv += ["--cwd", scratch, "--output-format", "json",
                      "--permission-mode", "dontAsk", "--disable-web-search", "--no-subagents",
                      "--max-turns", "1", "-p", self.prompt]
             return self.runner(argv, env=env)
