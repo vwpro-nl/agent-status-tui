@@ -281,14 +281,39 @@ def _claude_json_window(utilization: Any, key: str) -> Window | None:
     return Window(used_percent=max(0.0, min(100.0, float(used))), resets_at=resets_at)
 
 
+def _newest_omarchy(base: Path) -> dict[str, Any] | None:
+    """Newest valid Omarchy snapshot among ``base`` and its per-account
+    siblings (``<stem>-*``).  Omarchy writes
+    ``claude-limits-<account-id>.json`` next to (and, since 2026-11-18,
+    instead of) ``claude-limits.json``; sync leftovers such as
+    ``claude-limits [conflicted].json`` do not match and are ignored.
+    """
+    paths = [base]
+    try:
+        paths.extend(sorted(base.parent.glob(f"{base.stem}-*{base.suffix}")))
+    except OSError:
+        pass
+    best: dict[str, Any] | None = None
+    for path in paths:
+        data = _load_json(path)
+        if not isinstance(data, dict):
+            continue
+        fetched = data.get("fetchedAtMs")
+        if not isinstance(fetched, (int, float)) or isinstance(fetched, bool):
+            continue
+        if best is None or fetched > best["fetchedAtMs"]:
+            best = data
+    return best
+
+
 def observe_claude(claude_home: Path) -> Snapshot:
     """Read-only local cache read: never opens ``~/.claude/.credentials.json``,
     never makes a network call, never starts a model turn.
     """
     claude_json_path, omarchy_path = _claude_cache_paths(claude_home)
 
-    omarchy = _load_json(omarchy_path)
-    if isinstance(omarchy, dict) and isinstance(omarchy.get("fetchedAtMs"), (int, float)):
+    omarchy = _newest_omarchy(omarchy_path)
+    if omarchy is not None:
         five_hour = _omarchy_window(omarchy.get("limits"), "5-hour")
         weekly = _omarchy_window(omarchy.get("limits"), "7-day")
         if five_hour is not None or weekly is not None:
