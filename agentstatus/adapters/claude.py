@@ -57,15 +57,37 @@ def detect(env: Env) -> Detection:
 # --- capacity acquisition (ported from claude-status-tui) ------------------
 
 
+def _omarchy_candidates(env: Env) -> list:
+    """The configured cache file plus its per-account siblings.
+
+    Omarchy writes ``claude-limits-<account-id>.json`` next to (and, since
+    2026-11-18, instead of) ``claude-limits.json``.  Only ``<stem>-*`` names
+    count, so sync leftovers like ``claude-limits [conflicted].json`` are
+    ignored.
+    """
+    base = env.omarchy_claude_cache
+    paths = [base]
+    try:
+        paths.extend(sorted(base.parent.glob(f"{base.stem}-*{base.suffix}")))
+    except OSError:
+        pass
+    return paths
+
+
 def _read_omarchy(env: Env) -> dict[str, Any] | None:
-    data = load_json(env.omarchy_claude_cache)
-    if not isinstance(data, dict):
-        return None
-    if not isinstance(data.get("fetchedAtMs"), (int, float)):
-        return None
-    if not isinstance(data.get("limits"), list):
-        return None
-    return data
+    """Newest valid Omarchy snapshot (highest ``fetchedAtMs``) of all candidates."""
+    best: dict[str, Any] | None = None
+    for path in _omarchy_candidates(env):
+        data = load_json(path)
+        if not isinstance(data, dict):
+            continue
+        if not isinstance(data.get("fetchedAtMs"), (int, float)):
+            continue
+        if not isinstance(data.get("limits"), list):
+            continue
+        if best is None or data["fetchedAtMs"] > best["fetchedAtMs"]:
+            best = data
+    return best
 
 
 def _read_claude_json(env: Env) -> dict[str, Any] | None:
