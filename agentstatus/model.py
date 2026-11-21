@@ -45,6 +45,54 @@ BAR_EMPTY_BG = CSI + "48;5;236m"           # dark empty-meter background
 BAR_TEXT_ON_FILL = CSI + "38;5;252m"
 BAR_TEXT_ON_EMPTY = CSI + "38;5;252m"
 
+
+# --- shared dashboard colours ------------------------------------------------
+# ~/.config/monitor-dashboard/colors.conf (from ~/projects/monitor) holds the
+# colours shared by the dashboard panes: key=#rrggbb or key=<0-255>. Missing
+# file or key: the built-in values above stay. MONITOR_DASHBOARD_COLORS can
+# point elsewhere ("" switches the file off, as the tests do).
+def _shared_colors() -> dict:
+    import os
+    import re
+    path = os.environ.get("MONITOR_DASHBOARD_COLORS")
+    if path is None:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+        path = os.path.join(base, "monitor-dashboard", "colors.conf")
+    if not path:
+        return {}
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as stream:
+            for line in stream:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                value = (value.split() or [""])[0]
+                if re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+                    out[key.strip().lower()] = tuple(int(value[i:i + 2], 16) for i in (1, 3, 5))
+                elif re.fullmatch(r"\d{1,3}", value) and int(value) < 256:
+                    out[key.strip().lower()] = int(value)
+    except OSError:
+        return {}
+    return out
+
+
+def _sgr(value, layer: str = "38") -> str:
+    if isinstance(value, int):
+        return f"{layer};5;{value}"
+    return f"{layer};2;{value[0]};{value[1]};{value[2]}"
+
+
+_SHARED = _shared_colors()
+if "title" in _SHARED:
+    CYAN = CSI + _sgr(_SHARED["title"]) + "m"
+if "muted" in _SHARED:
+    MUTED = CSI + _sgr(_SHARED["muted"]) + "m"
+for _key, _name in (("ok", "BAR_FILL_OK"), ("pending", "BAR_FILL_WARN"), ("down", "BAR_FILL_HIGH")):
+    if _key in _SHARED:
+        globals()[_name] = CSI + _sgr(_SHARED[_key], "48") + "m"
+
 # --- nominal window durations ------------------------------------------------
 # Neither provider reliably delivers a window *duration*; only a reset instant.
 # These fixed nominal lengths are what both sibling tools already assume and are
